@@ -194,46 +194,112 @@ func (s *Store) Issue(ctx context.Context, user string, _ bool) (store.Credentia
 
 // Sweep implements store.Store.
 //
-// The sweeper only removes passwords, so it checks the marker but not
-// permissions: removing passwords cannot grant anything, and skipping the
-// ACL DRYRUN probes keeps the sweep cheap with many users.
+// Each server is swept on its own: ACLs are per server, a user may exist
+// (or carry stale passwords) on some servers only, and one unreachable
+// server must not stop expired passwords from being removed on the
+// others. The sweeper only removes passwords; it checks the marker and
+// the static privilege rules (it never touches users that Issue would
+// refuse), but skips the more expensive ACL DRYRUN probes.
 func (s *Store) Sweep(ctx context.Context) error {
-	// Collect user names from every server: a user may need cleanup on
-	// one server only.
-	names := map[string]bool{}
+	var errs []error
 	for i, c := range s.clients {
-		users, err := c.ACLUsers(ctx).Result()
-		if err != nil {
-			return s.wrap(i, err)
-		}
-		for _, u := range users {
-			if s.nameAllowed(u) {
-				names[u] = true
-			}
+		if err := s.sweepServer(ctx, i, c); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	list := make([]string, 0, len(names))
-	for u := range names {
-		list = append(list, u)
+	return errors.Join(errs...)
+}
+
+func (s *Store) sweepServer(ctx context.Context, i int, c *goredis.Client) error {
+	users, err := c.ACLUsers(ctx).Result()
+	if err != nil {
+		return s.wrap(i, err)
 	}
-	return store.ForEachShuffled(ctx, list, func(u string) error {
+	var names []string
+	for _, u := range users {
+		if s.nameAllowed(u) {
+			names = append(names, u)
+		}
+	}
+	return store.ForEachShuffled(ctx, names, func(u string) error {
 		unlock, err := s.locks.Lock(ctx, u)
 		if err != nil {
 			return err
 		}
 		defer unlock()
 		now := s.now()
-		present, foreign, perServer, err := s.inspect(ctx, u, now, false)
+		t, err := c.Time(ctx).Result()
 		if err != nil {
+			return s.wrap(i, err)
+		}
+		if err := store.CheckClock(s.sched, now, t); err != nil {
 			return err
 		}
+		raw, err := c.Do(ctx, "ACL", "GETUSER", u).Result()
+		if errors.Is(err, goredis.Nil) {
+			return nil // deleted meanwhile
+		}
+		if err != nil {
+			return s.wrap(i, err)
+		}
+		au, err := parseUser(raw)
+		if err != nil {
+			return s.wrap(i, err)
+		}
+		if !au.hasMarker(s.cfg.ManagedMarker) || au.privileged() != "" {
+			return nil
+		}
+		present, foreign := s.recognize(ctx, s.account(u), now, au.passwords)
 		plan, err := store.PlanSoft(s.sched, s.account(u), now, present, foreign, false)
 		if err != nil || !plan.Change {
 			return err
 		}
-		_, err = s.apply(ctx, u, plan.Keep, perServer)
-		return err
+		return s.setPasswords(ctx, i, c, u, plan.Keep)
 	})
+}
+
+// recognize maps password hashes to tenant-pass windows.
+func (s *Store) recognize(ctx context.Context, acc rotation.Account, now time.Time, hashes []string) ([]int64, int) {
+	byHash := map[string]int64{}
+	for _, n := range store.Candidates(s.sched, acc, now) {
+		if pw, _, err := s.sched.Password(ctx, acc, n); err == nil {
+			byHash[pwhash.Redis(pw)] = n
+		}
+	}
+	var present []int64
+	foreign := 0
+	for _, h := range hashes {
+		if n, ok := byHash[h]; ok {
+			if !slices.Contains(present, n) {
+				present = append(present, n)
+			}
+		} else {
+			foreign++
+		}
+	}
+	return present, foreign
+}
+
+// setPasswords makes server i hold exactly the passwords of windows keep.
+func (s *Store) setPasswords(ctx context.Context, i int, c *goredis.Client, user string, keep []int64) error {
+	acc := s.account(user)
+	args := []any{"ACL", "SETUSER", user, "resetpass"}
+	for _, n := range keep {
+		pw, _, err := s.sched.Password(ctx, acc, n)
+		if err != nil {
+			return err
+		}
+		args = append(args, "#"+pwhash.Redis(pw))
+	}
+	if err := c.Do(ctx, args...).Err(); err != nil {
+		return s.wrap(i, err)
+	}
+	if s.cfg.ACLSave {
+		if err := c.Do(ctx, "ACL", "SAVE").Err(); err != nil {
+			return s.wrap(i, err)
+		}
+	}
+	return nil
 }
 
 // serverState is the set of password hashes one server holds for a user.
@@ -316,23 +382,33 @@ var probes = [][]string{
 	{"SAVE"}, {"BGSAVE"}, {"BGREWRITEAOF"},
 	{"MONITOR"}, {"SYNC"}, {"PSYNC", "?", "-1"},
 	{"SLOWLOG", "RESET"}, {"LATENCY", "RESET"}, {"MEMORY", "PURGE"},
+	// Commands that see every key or channel name, regardless of key
+	// patterns: they leak other tenants' key names.
+	{"SCAN", "0"}, {"RANDOMKEY"}, {"PUBSUB", "CHANNELS"}, {"PUBSUB", "SHARDCHANNELS"},
+	{"DBSIZE"}, {"OBJECT", "FREQ", "x"},
 }
 
+// probeFirstChars spreads the random key and channel probes over many
+// first characters, so that partial patterns such as ~[a-s]* or ~t*
+// cannot slip between them.
+const probeFirstChars = "abfmqstxz09_-:{"
+
 // dryRun asks the server whether user could run any probe command, or
-// read, write or publish to a random key or channel (i.e. whether its key
-// or channel scope is unrestricted). It returns a reason if so.
+// read, write or publish to keys or channels with random names (that is,
+// whether its key or channel scope is unrestricted). It returns a reason
+// if so.
 func (s *Store) dryRun(ctx context.Context, c *goredis.Client, user string) (string, error) {
-	rnd := make([]byte, 12)
-	if _, err := rand.Read(rnd); err != nil {
-		return "", err
+	all := slices.Clone(probes)
+	for _, first := range probeFirstChars {
+		rnd := make([]byte, 8)
+		if _, err := rand.Read(rnd); err != nil {
+			return "", err
+		}
+		name := string(first) + "tenant-pass-probe-" + hex.EncodeToString(rnd)
+		all = append(all,
+			[]string{"GET", name}, []string{"SET", name, "x"},
+			[]string{"PUBLISH", name, "x"}, []string{"SUBSCRIBE", name})
 	}
-	probeName := "tenant-pass:probe:" + hex.EncodeToString(rnd)
-	all := append(slices.Clone(probes),
-		[]string{"GET", probeName},
-		[]string{"SET", probeName, "x"},
-		[]string{"PUBLISH", probeName, "x"},
-		[]string{"SUBSCRIBE", probeName},
-	)
 	for _, cmd := range all {
 		args := []any{"ACL", "DRYRUN", user}
 		for _, a := range cmd {
@@ -340,20 +416,24 @@ func (s *Store) dryRun(ctx context.Context, c *goredis.Client, user string) (str
 		}
 		res, err := c.Do(ctx, args...).Result()
 		if err != nil {
-			// A command this server does not know (older versions) cannot
-			// be run by anyone; everything else is a real failure.
-			if strings.Contains(strings.ToLower(err.Error()), "not found") ||
-				strings.Contains(strings.ToLower(err.Error()), "unknown command") {
+			// Only a command this server does not know (older versions)
+			// may be skipped: nobody can run it. Anything else - notably
+			// "User ... not found" if the user was deleted meanwhile - is
+			// a failure, never a pass.
+			msg := strings.ToLower(err.Error())
+			if strings.HasPrefix(msg, "err command") || strings.Contains(msg, "unknown command") || strings.Contains(msg, "unknown subcommand") {
 				continue
+			}
+			if strings.Contains(msg, "user") && strings.Contains(msg, "not found") {
+				return "user does not exist", nil
 			}
 			return "", err
 		}
 		if str, ok := res.(string); ok && str == "OK" {
-			name := strings.ToLower(strings.Join(cmd[:min(2, len(cmd))], " "))
-			if strings.Contains(name, "tenant-pass:probe:") {
+			if strings.Contains(cmd[min(1, len(cmd)-1)], "tenant-pass-probe-") {
 				return "user has unrestricted key or channel access (" + strings.ToLower(cmd[0]) + ")", nil
 			}
-			return "user may run " + name, nil
+			return "user may run " + strings.ToLower(strings.Join(cmd[:min(2, len(cmd))], " ")), nil
 		}
 	}
 	return "", nil
@@ -428,6 +508,8 @@ var dangerousRules = map[string][]string{
 	"sync": nil, "psync": nil, "monitor": nil, "flushall": nil, "flushdb": nil,
 	"swapdb": nil, "save": nil, "bgsave": nil, "bgrewriteaof": nil, "lastsave": nil,
 	"keys": nil, "sentinel": nil, "pfdebug": nil, "slowlog": nil, "latency": nil,
+	"scan": nil, "randomkey": nil, "dbsize": nil,
+	"pubsub":   {"channels", "shardchannels", "numpat"},
 	"client":   {"kill", "list", "pause", "unpause", "no-evict", "no-touch"},
 	"function": {"load", "delete", "flush", "restore"},
 	"script":   {"flush", "kill"},

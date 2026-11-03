@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -91,6 +90,15 @@ type ServerTLS struct {
 	KeyFile  string `json:"key_file"`
 	// ClientCAFile enables client certificate authentication.
 	ClientCAFile string `json:"client_ca_file"`
+	// ClientURIs / ClientDNSNames (tenant-pass-gateway only) restrict
+	// which client certificates may call: at least one SAN must match.
+	ClientURIs     []string `json:"client_uris,omitempty"`
+	ClientDNSNames []string `json:"client_dns_names,omitempty"`
+}
+
+// IsZero reports whether no TLS setting is present.
+func (t ServerTLS) IsZero() bool {
+	return t.CertFile == "" && t.KeyFile == "" && t.ClientCAFile == "" && len(t.ClientURIs) == 0 && len(t.ClientDNSNames) == 0
 }
 
 // GatewayKey is a trusted gateway public key.
@@ -102,7 +110,21 @@ type GatewayKey struct {
 // PassSettings tunes pass verification.
 type PassSettings struct {
 	MaxTTL Duration `json:"max_ttl"`
-	Leeway Duration `json:"leeway"`
+	// Leeway is a pointer so that an explicit "0s" (no leeway) is kept
+	// rather than replaced by the default.
+	Leeway *Duration `json:"leeway"`
+}
+
+// VerifierLeeway converts the configured leeway for pass.Verifier, which
+// treats 0 as "default" and negative as "none".
+func (p PassSettings) VerifierLeeway() time.Duration {
+	if p.Leeway == nil {
+		return 0
+	}
+	if *p.Leeway == 0 {
+		return -1
+	}
+	return time.Duration(*p.Leeway)
 }
 
 // AppConfig is one application.
@@ -262,19 +284,11 @@ type Shutdown struct {
 // Load reads and strictly parses the configuration file and applies
 // defaults. It does not touch secrets or the network; see Resolve.
 func Load(path string) (*File, error) {
-	st, err := os.Stat(path)
+	// The configuration decides what is trusted: same integrity checks
+	// as for key files, on a single open of the file.
+	b, err := secret.ReadTrusted(path)
 	if err != nil {
-		return nil, err
-	}
-	if st.Size() > MaxFileSize {
-		return nil, fmt.Errorf("config: %s is too large", path)
-	}
-	if st.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("config: %s is writable by group or others", path)
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	var f File
 	if err := strictjson.Decode(b, &f); err != nil {
@@ -291,8 +305,9 @@ func (f *File) applyDefaults() {
 	if f.Pass.MaxTTL == 0 {
 		f.Pass.MaxTTL = Duration(pass.DefaultMaxTTL)
 	}
-	if f.Pass.Leeway == 0 {
-		f.Pass.Leeway = Duration(pass.DefaultLeeway)
+	if f.Pass.Leeway == nil {
+		d := Duration(pass.DefaultLeeway)
+		f.Pass.Leeway = &d
 	}
 	if f.Rotation.Window == 0 {
 		f.Rotation.Window = Duration(15 * time.Minute)
@@ -397,14 +412,22 @@ func Resolve(f *File, now time.Time) (*Resolved, error) {
 		if !f.AllowInsecurePlaintext {
 			fail("insecure_plaintext_http requires allow_insecure_plaintext (testing only)")
 		}
-		if f.TLS != (ServerTLS{}) {
+		if !f.TLS.IsZero() {
 			fail("insecure_plaintext_http cannot be combined with tls")
 		}
 	} else {
 		if f.TLS.CertFile == "" || f.TLS.KeyFile == "" {
 			fail("tls.cert_file and tls.key_file are required")
-		} else if _, err := secret.ReadFile(f.TLS.KeyFile); err != nil {
-			fail("tls.key_file: %v", err)
+		} else if _, err := netcfg.LoadKeyPair(f.TLS.CertFile, f.TLS.KeyFile); err != nil {
+			fail("tls: %v", err)
+		}
+		if f.TLS.ClientCAFile != "" {
+			if _, err := netcfg.LoadCertPool(f.TLS.ClientCAFile); err != nil {
+				fail("tls.client_ca_file: %v", err)
+			}
+		}
+		if len(f.TLS.ClientURIs) > 0 || len(f.TLS.ClientDNSNames) > 0 {
+			fail("tls.client_uris/client_dns_names are gateway settings; tenant-pass pins certificates per app (apps[].client_cert_uri)")
 		}
 	}
 
@@ -431,7 +454,7 @@ func Resolve(f *File, now time.Time) (*Resolved, error) {
 	if f.Pass.MaxTTL <= 0 || time.Duration(f.Pass.MaxTTL) > pass.HardMaxTTL {
 		fail("pass.max_ttl must be between 1s and %s", pass.HardMaxTTL)
 	}
-	if f.Pass.Leeway < 0 || time.Duration(f.Pass.Leeway) > 30*time.Second {
+	if *f.Pass.Leeway < 0 || time.Duration(*f.Pass.Leeway) > 30*time.Second {
 		fail("pass.leeway must be between 0 and 30s")
 	}
 
@@ -815,7 +838,7 @@ func DistinctKeys(gateway map[string]ed25519.PublicKey, jobs []ed25519.PublicKey
 // ReadEd25519PublicKey reads a PEM ("PUBLIC KEY", PKIX) Ed25519 public
 // key.
 func ReadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
-	b, err := os.ReadFile(path)
+	b, err := secret.ReadTrusted(path)
 	if err != nil {
 		return nil, err
 	}
@@ -830,6 +853,9 @@ func ReadEd25519PublicKey(path string) (ed25519.PublicKey, error) {
 	pk, ok := k.(ed25519.PublicKey)
 	if !ok {
 		return nil, errors.New("not an Ed25519 key")
+	}
+	if err := kms.CheckEd25519PublicKey(pk); err != nil {
+		return nil, err
 	}
 	return pk, nil
 }

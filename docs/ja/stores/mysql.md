@@ -77,7 +77,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON acme.* TO t_acme;   -- what the tenant n
 - `managed_role`@`managed_role_host` が付与されており、**それ以外のロールは** 付与されていない。
 - アカウントも管理対象ロールも **グローバル権限を一切** 持たない（`mysql.user` のすべての `*_priv` 列が `N` でなければならない。`SELECT ON *.*` でさえすべてのテナントに届くため）。
 - どちらも動的権限（`SYSTEM_USER` を含む `mysql.global_grants`）を持たない。
-- どちらも `mysql`、`sys`、`performance_schema` スキーマに対する権限や、PROXY 権限を持たない。
+- どちらも `mysql`、`sys`、`performance_schema`、`information_schema` スキーマに対する権限（`` GRANT … ON `%`.* `` や `` `m_sql`.* `` のようなワイルドカードのデータベース権限によるものを含む。`mysql.db` のデータベース名はパターンであり、tenant-pass はシステムスキーマ名をそれらと照合します）や、PROXY 権限を持たない。
+- 管理対象ロールがいかなる権限も持たない（マーカーにすぎないため）。
 - 管理対象ロールにロールが付与されていない。
 - サーバーの `mandatory_roles` が空である（必須ロールはすべてのアカウントに適用され、アカウントごとにチェックできないため）。
 - tenant-pass 自身のアカウントではない。

@@ -13,6 +13,7 @@ func TestAuthenticate(t *testing.T) {
 		{Name: "billing", TokenSHA256: HashToken("tpa_billing")},
 		{Name: "crm", TokenSHA256: HashToken("tpa_crm"), ClientCertURI: "spiffe://example.org/crm"},
 		{Name: "batch", ClientCertURI: "spiffe://example.org/batch"},
+		{Name: "batch2", ClientCertURI: "spiffe://example.org/batch2"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +36,7 @@ func TestAuthenticate(t *testing.T) {
 		{"token with wrong cert", []string{"Bearer tpa_crm"}, []string{"spiffe://example.org/batch"}, ""},
 		{"cert only", nil, []string{"spiffe://example.org/batch"}, "batch"},
 		{"cert of token app", nil, []string{"spiffe://example.org/crm"}, ""},
+		{"cert naming two cert-only apps", nil, []string{"spiffe://example.org/batch", "spiffe://example.org/batch2"}, ""},
 	}
 	for _, c := range cases {
 		r := httptest.NewRequest("POST", "/v1/credentials", nil)

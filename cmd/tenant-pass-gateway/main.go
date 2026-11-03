@@ -15,7 +15,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +27,7 @@ import (
 	"time"
 
 	"github.com/kobesoft-labs/tenant-pass/internal/gateway"
+	"github.com/kobesoft-labs/tenant-pass/internal/netcfg"
 )
 
 var version = "dev"
@@ -100,27 +100,33 @@ func serve(args []string, checkOnly bool) error {
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
 	if !f.InsecurePlaintextHTTP {
-		hs.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		cert, err := netcfg.LoadKeyPair(f.TLS.CertFile, f.TLS.KeyFile)
+		if err != nil {
+			return fmt.Errorf("tls: %w", err)
+		}
+		hs.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 		if f.TLS.ClientCAFile != "" {
-			// Only the proxy, holding a certificate from this CA, may call
-			// the gateway.
-			pemBytes, err := os.ReadFile(f.TLS.ClientCAFile)
+			pool, err := netcfg.LoadCertPool(f.TLS.ClientCAFile)
 			if err != nil {
-				return err
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(pemBytes) {
-				return errors.New("tls.client_ca_file contains no certificates")
+				return fmt.Errorf("tls.client_ca_file: %w", err)
 			}
 			hs.TLSConfig.ClientCAs = pool
 			hs.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			// Only certificates naming an allowed caller (the proxy) are
+			// accepted; a shared mesh CA alone is not enough.
+			hs.TLSConfig.VerifyConnection = gateway.CallerCertCheck(f.TLS.ClientURIs, f.TLS.ClientDNSNames)
 		}
 	}
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
+	if f.HealthListen != "" {
+		hh := &http.Server{Addr: f.HealthListen, Handler: gateway.HealthHandler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() { errc <- hh.ListenAndServe() }()
+		defer hh.Close()
+	}
 	go func() {
 		logger.Info("listening", "addr", f.Listen, "version", version)
 		if hs.TLSConfig != nil {
-			errc <- hs.ListenAndServeTLS(f.TLS.CertFile, f.TLS.KeyFile)
+			errc <- hs.ListenAndServeTLS("", "")
 		} else {
 			errc <- hs.ListenAndServe()
 		}

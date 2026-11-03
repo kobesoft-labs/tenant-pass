@@ -5,10 +5,16 @@ import (
 	"testing"
 )
 
+type item struct {
+	N int `json:"n"`
+}
+
 type sample struct {
-	A string   `json:"a"`
-	B []string `json:"b"`
-	C *struct {
+	Items []item          `json:"items"`
+	M     map[string]item `json:"m"`
+	A     string          `json:"a"`
+	B     []string        `json:"b"`
+	C     *struct {
 		D int `json:"d"`
 	} `json:"c"`
 }
@@ -20,6 +26,16 @@ func TestDecode(t *testing.T) {
 	}
 	if s.A != "x" || len(s.B) != 2 || s.C.D != 3 {
 		t.Fatalf("got %+v", s)
+	}
+}
+
+func TestMapKeysAreFree(t *testing.T) {
+	var s sample
+	if err := Decode([]byte(`{"m":{"Any-Key":{"n":1},"other":{"n":2}},"items":[{"n":3}]}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	if err := Decode([]byte(`{"m":{"k":{"N":1}}}`), &s); err == nil {
+		t.Fatal("case variant inside map value accepted")
 	}
 }
 
@@ -35,6 +51,11 @@ func TestDecodeRejects(t *testing.T) {
 		"empty":            ``,
 		"too deep":         `{"b":` + strings.Repeat("[", MaxDepth+1) + strings.Repeat("]", MaxDepth+1) + `}`,
 		"wrong type":       `{"a":1}`,
+		"case variant":     `{"A":"x"}`,
+		"case duplicate":   `{"a":"x","A":"y"}`,
+		"unicode fold":     "{\"\u017f\":\"x\"}",
+		"nested case":      `{"c":{"D":1}}`,
+		"slice elem case":  `{"items":[{"N":1}]}`,
 	}
 	for name, in := range cases {
 		var s sample

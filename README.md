@@ -42,7 +42,7 @@ With tenant-pass:
 - **Rate-limited blast radius.** Each application can obtain credentials for only a limited number of *distinct* tenants per minute.
 - **Expiry enforced by the database.** PostgreSQL rejects the password after `VALID UNTIL` even if tenant-pass is down. MySQL and Redis have no native expiry, so tenant-pass keeps at most two windows of passwords and sweeps expired ones.
 - **No plaintext on the wire to the database.** tenant-pass sends SCRAM verifiers (PostgreSQL), `caching_sha2_password` hashes (MySQL) and SHA-256 ACL hashes (Redis). Passwords never appear in database logs, statement statistics or replication streams.
-- **Refuses dangerous accounts.** tenant-pass changes only accounts explicitly marked as managed, and it never touches accounts with administrative or cross-tenant privileges — including privileges inherited through role membership — even if the directory points at them.
+- **Refuses dangerous accounts.** tenant-pass changes only accounts explicitly marked as managed, and it never touches accounts with administrative or server-wide privileges — including privileges inherited through role membership — even if the directory points at them. (Grants on another tenant's objects cannot be detected in general: keeping each tenant's grants to its own objects is part of your provisioning.)
 - **Trusts the database clock, not its own.** Before writing, every replica compares its clock with the store server's; a replica with a broken clock refuses instead of pushing passwords into the future.
 
 This is not a general secrets manager. If you need dynamic credentials without request binding, look at HashiCorp Vault / OpenBao database secrets engines. tenant-pass covers one narrower case: **request-bound, per-tenant** access for multi-tenant SaaS.
@@ -52,7 +52,7 @@ This is not a general secrets manager. If you need dynamic credentials without r
 | | PostgreSQL | MySQL | Redis / Valkey |
 | --- | --- | --- | --- |
 | Account | role | user | ACL user |
-| Supported versions | 13+ (16+ strongly recommended) | 8.0.27+, 8.4, 9.x | Redis 7.0+, Valkey 7.2+ |
+| Supported versions | 16+ | 8.0.27+, 8.4, 9.x | Redis 7.0+, Valkey 7.2+ |
 | What is sent | SCRAM-SHA-256 verifier | caching_sha2_password hash | SHA-256 ACL hash |
 | Expiry | hard (`VALID UNTIL`) | soft (dual passwords + sweeper) | soft (multiple passwords + sweeper) |
 | Rotation overlap | none (clients retry once) | old and new both valid | old and new both valid |
@@ -79,7 +79,7 @@ go install github.com/kobesoft-labs/tenant-pass/cmd/tenant-pass-gateway@latest  
 tenant-pass gen-gateway-key -private gw.key -public gw.pub
 
 # Rotation key (tenant-pass only)
-tenant-pass gen-rotation-key -out rotation.key
+tenant-pass gen-rotation-key -out rotation.key   # *.key files are git- and docker-ignored
 
 # Application token: give the token to the application, put the hash in the config
 tenant-pass gen-app-token
@@ -88,7 +88,10 @@ tenant-pass gen-app-token
 Prepare a PostgreSQL role for one tenant ([full instructions](docs/en/stores/postgres.md)):
 
 ```sql
+CREATE DATABASE tenant_pass;                                  -- tenant-pass's own database
+REVOKE ALL ON DATABASE tenant_pass FROM PUBLIC;               -- tenants must not connect to it
 CREATE ROLE tenant_pass_admin LOGIN CREATEROLE PASSWORD '...';
+GRANT CONNECT ON DATABASE tenant_pass TO tenant_pass_admin;
 CREATE ROLE tenant_pass_managed NOLOGIN;
 CREATE ROLE t_acme LOGIN IN ROLE tenant_pass_managed;
 GRANT t_acme TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
@@ -111,7 +114,7 @@ curl -s https://tenant-pass.internal:8443/v1/credentials \
 {
   "tenant": "acme", "store": "postgres",
   "host": "pgbouncer.internal", "port": 6432, "database": "app",
-  "username": "t_acme", "password": "umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM",
+  "username": "t_acme", "password": "lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE",
   "expires_at": "2026-11-03T12:13:59Z", "refresh_at": "2026-11-03T12:08:59Z"
 }
 ```

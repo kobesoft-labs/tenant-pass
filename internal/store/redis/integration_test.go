@@ -81,7 +81,7 @@ func setup(t *testing.T) (*Store, *rotation.Schedule, []string) {
 	for _, a := range as {
 		c := bootstrap(t, a)
 		for _, cmd := range [][]any{
-			{"ACL", "DELUSER", "tenant_pass_admin", "t_acme", "t_beta", "t_admin", "t_sel", "t_slow", "t_allkeys", "t_nomark", "t_allchan"},
+			{"ACL", "DELUSER", "tenant_pass_admin", "t_acme", "t_beta", "t_admin", "t_sel", "t_slow", "t_allkeys", "t_nomark", "t_allchan", "t_scan", "t_partial", "t_markadmin", "t_onlyone"},
 			// Documented admin user (docs/en/stores/redis.md).
 			{"ACL", "SETUSER", "tenant_pass_admin", "on", ">adminpw", "-@all",
 				"+acl|getuser", "+acl|setuser", "+acl|users", "+acl|dryrun", "+acl|save", "+time", "+ping", "+auth", "+hello"},
@@ -96,6 +96,12 @@ func setup(t *testing.T) (*Store, *rotation.Schedule, []string) {
 			{"ACL", "SETUSER", "t_allkeys", "on", "resetchannels", "&tenant-pass:managed", "-@all", "+get", "~*"},
 			{"ACL", "SETUSER", "t_allchan", "on", "resetchannels", "&tenant-pass:managed", "&*", "-@all", "+get", "+publish", "~t:allchan:*"},
 			{"ACL", "SETUSER", "t_nomark", "on", ">keep-me", "resetchannels", "-@all", "+get", "~t:nomark:*"},
+			// SCAN sees every key name; a partial pattern reaches other tenants.
+			{"ACL", "SETUSER", "t_scan", "on", "resetchannels", "&tenant-pass:managed", "-@all", "+get", "+scan", "~t:scan:*"},
+			{"ACL", "SETUSER", "t_partial", "on", "resetchannels", "&tenant-pass:managed", "-@all", "+get", "~[a-s]*"},
+			// A privileged user carrying the marker: refused, and the
+			// sweeper must leave its password alone.
+			{"ACL", "SETUSER", "t_markadmin", "on", ">admin-keep", "resetchannels", "&tenant-pass:managed", "-@all", "+@admin"},
 		} {
 			if err := c.Do(ctx, cmd...).Err(); err != nil {
 				t.Fatalf("%v: %v", cmd, err)
@@ -227,6 +233,41 @@ func TestIntegrationSweepRespectsMarker(t *testing.T) {
 	}
 }
 
+func TestIntegrationSweepSkipsPrivileged(t *testing.T) {
+	s, _, as := setup(t)
+	if err := s.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !canAuthAll(t, as, "t_markadmin", "admin-keep") {
+		t.Fatal("sweeper removed the password of a privileged user")
+	}
+}
+
+// A user that exists on one server only is still swept there.
+func TestIntegrationSweepPerServer(t *testing.T) {
+	s, sched, as := setup(t)
+	if len(as) < 2 {
+		t.Skip("needs two servers")
+	}
+	ctx := context.Background()
+	b := bootstrap(t, as[0])
+	if err := b.Do(ctx, "ACL", "SETUSER", "t_onlyone", "on", "resetchannels", "&tenant-pass:managed", "-@all", "+get", "~t:one:*").Err(); err != nil {
+		t.Fatal(err)
+	}
+	acc := rotation.Account{Store: Type, Node: "rd1", Name: "t_onlyone"}
+	n := sched.Index(acc, time.Now()) - 1 // an expired window
+	pw, _, _ := sched.Password(ctx, acc, n)
+	if err := b.Do(ctx, "ACL", "SETUSER", "t_onlyone", "resetpass", ">"+pw).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if canAuth(t, as[0], "t_onlyone", pw) {
+		t.Fatal("expired password survived on the server where the user exists")
+	}
+}
+
 func TestIntegrationClockSkew(t *testing.T) {
 	s, sched, _ := setup(t)
 	sched.MaxClockSkew = 10 * time.Second
@@ -239,7 +280,7 @@ func TestIntegrationClockSkew(t *testing.T) {
 func TestIntegrationRefusals(t *testing.T) {
 	s, _, as := setup(t)
 	ctx := context.Background()
-	for _, u := range []string{"t_admin", "t_sel", "t_missing", "default", "tenant_pass_admin", "t_slow", "t_allkeys", "t_allchan", "t_nomark"} {
+	for _, u := range []string{"t_admin", "t_sel", "t_missing", "default", "tenant_pass_admin", "t_slow", "t_allkeys", "t_allchan", "t_nomark", "t_scan", "t_partial", "t_markadmin"} {
 		if _, err := s.Issue(ctx, u, false); !errors.Is(err, store.ErrRefused) {
 			t.Errorf("%s: err = %v, want refused", u, err)
 		}

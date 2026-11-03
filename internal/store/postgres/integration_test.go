@@ -14,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,12 @@ func endpoint(t *testing.T, user, password string) *netcfg.Resolved {
 	pn, _ := strconv.Atoi(port)
 	p := filepathSecret(t, password)
 	return &netcfg.Resolved{Host: host, Port: port, PortNum: uint16(pn), User: user, Password: p, Database: "postgres"}
+}
+
+func adminEndpoint(t *testing.T) *netcfg.Resolved {
+	e := endpoint(t, "tenant_pass_admin", "adminpw")
+	e.Database = "tenant_pass"
+	return e
 }
 
 func filepathSecret(t *testing.T, s string) secret.Value {
@@ -63,10 +70,17 @@ func connect(t *testing.T, e *netcfg.Resolved) (*pgx.Conn, error) {
 
 const setupSQL = `
 DROP ROLE IF EXISTS t_acme, t_beta, t_super, t_nomember, t_createdb, t_nologin, t_inherit, t_predef, t_loginmember, t_adminopt;
-DROP ROLE IF EXISTS tenant_pass_managed, tenant_pass_admin, tp_dba_group, tp_some_user;
+DO $$ BEGIN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'tenant_pass_admin') THEN
+    EXECUTE 'REVOKE ALL ON DATABASE tenant_pass FROM tenant_pass_admin';
+  END IF;
+END $$;
+DROP ROLE IF EXISTS t_adminparent;
+DROP ROLE IF EXISTS tenant_pass_managed, tenant_pass_admin, tp_dba_group, tp_some_user, tp_admin_parent;
 
 -- Documented setup (docs/en/stores/postgres.md).
 CREATE ROLE tenant_pass_admin LOGIN CREATEROLE PASSWORD 'adminpw';
+GRANT CONNECT ON DATABASE tenant_pass TO tenant_pass_admin;
 CREATE ROLE tenant_pass_managed NOLOGIN;
 
 CREATE ROLE t_acme LOGIN IN ROLE tenant_pass_managed;
@@ -88,6 +102,11 @@ CREATE ROLE tp_some_user LOGIN;
 CREATE ROLE t_loginmember LOGIN IN ROLE tenant_pass_managed, tp_some_user;
 CREATE ROLE t_adminopt LOGIN IN ROLE tenant_pass_managed;
 GRANT t_acme TO t_adminopt WITH ADMIN OPTION;
+-- ADMIN OPTION held through a parent role.
+CREATE ROLE tp_admin_parent NOLOGIN;
+GRANT t_acme TO tp_admin_parent WITH ADMIN OPTION;
+CREATE ROLE t_adminparent LOGIN IN ROLE tenant_pass_managed, tp_admin_parent;
+GRANT t_adminparent TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
 GRANT t_inherit, t_predef, t_loginmember, t_adminopt TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
 `
 
@@ -98,6 +117,17 @@ func setup(t *testing.T) (*Store, *rotation.Schedule) {
 		t.Fatal(err)
 	}
 	defer su.Close(context.Background())
+	// tenant-pass's own database: nobody but the admin may connect.
+	var exists bool
+	_ = su.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'tenant_pass')`).Scan(&exists)
+	if !exists {
+		if _, err := su.Exec(context.Background(), `CREATE DATABASE tenant_pass`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := su.Exec(context.Background(), `REVOKE ALL ON DATABASE tenant_pass FROM PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := su.Exec(context.Background(), setupSQL); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +139,7 @@ func setup(t *testing.T) (*Store, *rotation.Schedule) {
 	// TestIntegrationClockSkew checks the real limit.
 	sched.MaxClockSkew = 48 * time.Hour
 	s, err := New(context.Background(), Config{
-		Name: "pg1", Endpoint: endpoint(t, "tenant_pass_admin", "adminpw"),
+		Name: "pg1", Endpoint: adminEndpoint(t),
 		ManagedGroup: "tenant_pass_managed", AccountPattern: regexp.MustCompile(`^t_[a-z]+$`),
 	}, sched)
 	if err != nil {
@@ -220,10 +250,27 @@ func TestIntegrationClockSkew(t *testing.T) {
 func TestIntegrationRefusals(t *testing.T) {
 	s, _ := setup(t)
 	for _, role := range []string{"t_super", "t_nomember", "t_createdb", "t_nologin", "t_missing", "tenant_pass_admin", "postgres",
-		"t_inherit", "t_predef", "t_loginmember", "t_adminopt"} {
+		"t_inherit", "t_predef", "t_loginmember", "t_adminopt", "t_adminparent"} {
 		_, err := s.Issue(context.Background(), role, false)
 		if !errors.Is(err, store.ErrRefused) {
 			t.Errorf("%s: err = %v, want refused", role, err)
 		}
+	}
+}
+
+// A database that tenants may connect to is refused: they could hold the
+// advisory locks tenant-pass uses and block other tenants' rotation.
+func TestIntegrationRequiresDedicatedDatabase(t *testing.T) {
+	_, sched := setup(t)
+	s, err := New(context.Background(), Config{
+		Name: "pg1", Endpoint: endpoint(t, "tenant_pass_admin", "adminpw"), // database "postgres"
+		ManagedGroup: "tenant_pass_managed", AccountPattern: regexp.MustCompile(`^t_[a-z]+$`),
+	}, sched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Issue(context.Background(), "t_acme", false); err == nil || !strings.Contains(err.Error(), "dedicated database") {
+		t.Fatalf("err = %v", err)
 	}
 }

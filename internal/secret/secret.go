@@ -48,42 +48,75 @@ func (Value) MarshalText() ([]byte, error) { return []byte("[redacted]"), nil }
 // other users). The default discards them; main sets it to the logger.
 var Warn = func(msg string, path string) {}
 
+// readChecked opens path once and applies every check to that open file
+// (no gap between checking and reading in which the file could be
+// swapped): it must be a regular file, not writable by group or others,
+// owned by the current user or by root, and at most max bytes.
+func readChecked(path string, max int64) ([]byte, os.FileMode, error) {
+	if path == "" {
+		return nil, 0, errors.New("empty path")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("%s is not a regular file", path)
+	}
+	if st.Mode().Perm()&0o022 != 0 {
+		return nil, 0, fmt.Errorf("%s is writable by group or others (mode %o)", path, st.Mode().Perm())
+	}
+	if err := checkOwner(st); err != nil {
+		return nil, 0, fmt.Errorf("%s: %w", path, err)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(b)) > max {
+		return nil, 0, fmt.Errorf("%s is larger than %d bytes", path, max)
+	}
+	return b, st.Mode().Perm(), nil
+}
+
+// MaxTrustedFileSize bounds files read with ReadTrusted.
+const MaxTrustedFileSize = 4 << 20
+
+// ReadTrusted reads a file that is not secret but decides what is
+// trusted: public keys, CA bundles, certificates, JWKS, configuration.
+// Anyone who can write such a file can make tenant-pass trust their own
+// key, so the same integrity checks as for secrets apply (regular file,
+// not writable by group or others, owned by the current user or root);
+// being readable by others is fine.
+func ReadTrusted(path string) ([]byte, error) {
+	b, _, err := readChecked(path, MaxTrustedFileSize)
+	if err != nil {
+		return nil, fmt.Errorf("file: %w", err)
+	}
+	return b, nil
+}
+
 // ReadFile reads a secret file. It rejects files that are not regular
 // files, that are writable by group or others (anyone who can write the
-// file can replace the secret), or that are empty or too large. A
-// trailing newline (as added by most editors and `echo`) is removed.
+// file can replace the secret), that are owned by another unprivileged
+// user, or that are empty or too large. A trailing newline (as added by
+// most editors and `echo`) is removed.
 //
 // Files readable by group or others are accepted with a warning, because
 // common secret mounts (Docker Swarm, Kubernetes) are mode 0444 inside a
 // container whose only user is tenant-pass.
 func ReadFile(path string) (Value, error) {
-	if path == "" {
-		return Value{}, errors.New("secret: empty path")
-	}
-	f, err := os.Open(path)
+	b, mode, err := readChecked(path, MaxFileSize)
 	if err != nil {
 		return Value{}, fmt.Errorf("secret: %w", err)
 	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return Value{}, fmt.Errorf("secret: %w", err)
-	}
-	if !st.Mode().IsRegular() {
-		return Value{}, fmt.Errorf("secret: %s is not a regular file", path)
-	}
-	if st.Mode().Perm()&0o022 != 0 {
-		return Value{}, fmt.Errorf("secret: %s is writable by group or others (mode %o)", path, st.Mode().Perm())
-	}
-	if st.Mode().Perm()&0o044 != 0 {
+	if mode&0o044 != 0 {
 		Warn("secret file is readable by group or others", path)
-	}
-	b, err := io.ReadAll(io.LimitReader(f, MaxFileSize+1))
-	if err != nil {
-		return Value{}, fmt.Errorf("secret: %w", err)
-	}
-	if len(b) > MaxFileSize {
-		return Value{}, fmt.Errorf("secret: %s is larger than %d bytes", path, MaxFileSize)
 	}
 	b = bytes.TrimSuffix(b, []byte("\n"))
 	b = bytes.TrimSuffix(b, []byte("\r"))

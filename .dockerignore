@@ -3,3 +3,12 @@
 .e2e-bin
 docs
 *.md
+# Keys, tokens and secrets must never enter the build context.
+*.key
+*.pem
+*.token
+.env
+.env.*
+rotation-*
+/tenant-pass
+/tenant-pass-gateway

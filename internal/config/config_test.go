@@ -2,8 +2,11 @@ package config
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +34,9 @@ func fixture(t *testing.T, mutate func(string) string) string {
 	w("sched.pub", string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der2})), 0o644)
 	w("rot.key", "pQ4m0g2Yk3qvQW1o8bqgK3n4cS1u9xJ0eF7rT6yU5iA=\n", 0o600)
 	w("pg.pw", "adminpw\n", 0o600)
-	w("tls.key", "unused\n", 0o600)
+	certPEM, keyPEM := selfSigned(t)
+	w("tls.crt", certPEM, 0o644)
+	w("tls.key", keyPEM, 0o600)
 	cfg := `{
   "listen": "127.0.0.1:8443",
   "tls": {"cert_file": "DIR/tls.crt", "key_file": "DIR/tls.key"},
@@ -52,6 +57,20 @@ func fixture(t *testing.T, mutate func(string) string) string {
 		cfg = mutate(cfg)
 	}
 	return w("config.json", strings.ReplaceAll(cfg, "DIR", dir), 0o600)
+}
+
+func selfSigned(t *testing.T) (string, string) {
+	t.Helper()
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "tenant-pass.test"},
+		DNSNames: []string{"tenant-pass.test"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, _ := x509.MarshalPKCS8PrivateKey(priv)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
 }
 
 func load(t *testing.T, mutate func(string) string) (*Resolved, error) {
@@ -176,6 +195,32 @@ func TestJobsAndVaultValid(t *testing.T) {
 	}
 	if j := r.Apps[0].Jobs; j == nil || j.Issue || time.Duration(j.MaxTTL) != time.Hour || j.MaxTenantsPerMinute != 600 {
 		t.Fatalf("app jobs: %+v", j)
+	}
+}
+
+// A degenerate gateway key would let anyone forge passes.
+func TestSmallOrderGatewayKeyRefused(t *testing.T) {
+	identity := make([]byte, 32)
+	identity[0] = 1
+	der := append([]byte{0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00}, identity...)
+	p := filepath.Join(t.TempDir(), "weak.pub")
+	if err := os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEd25519PublicKey(p); err == nil {
+		t.Fatal("identity point accepted as gateway key")
+	}
+}
+
+// Trust anchors must not be writable by others.
+func TestTrustFilePermissions(t *testing.T) {
+	pk, _, _ := ed25519.GenerateKey(nil)
+	der, _ := x509.MarshalPKIXPublicKey(pk)
+	p := filepath.Join(t.TempDir(), "gw.pub")
+	os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o644)
+	os.Chmod(p, 0o664)
+	if _, err := ReadEd25519PublicKey(p); err == nil {
+		t.Fatal("group-writable gateway key accepted")
 	}
 }
 

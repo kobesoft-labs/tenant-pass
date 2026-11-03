@@ -30,7 +30,7 @@ services:
 ## 初期構築
 
 1. ストアの管理者アカウントとマーカーロールを用意します（[PostgreSQL](stores/postgres.md)、[MySQL](stores/mysql.md)、[Redis](stores/redis.md)）。
-2. `tenant-pass gen-rotation-key -out rotation-YYYY-MM` — tenant-pass のレプリカにのみ配布します。
+2. `tenant-pass gen-rotation-key -out rotation-YYYY-MM.key` — tenant-pass のレプリカにのみ配布します。（拡張子 `.key` は残してください。`*.key` は git と Docker のビルドコンテキストで無視されます。）
 3. `tenant-pass gen-gateway-key …` — 秘密鍵はゲートウェイへ、公開鍵は tenant-pass へ。
 4. 各アプリケーションについて `tenant-pass gen-app-token` — トークンはアプリケーションのシークレットストアへ、ハッシュは設定ファイルへ。
 5. `tenant-pass check-config -config config.json -connect`。
@@ -40,7 +40,7 @@ services:
 
 鍵には `not_before` があるため、すべてのレプリカが協調なしに同じウィンドウで切り替わります。
 
-1. `tenant-pass gen-rotation-key -out rotation-2026-12`。
+1. `tenant-pass gen-rotation-key -out rotation-2026-12.key`。
 2. 展開が完了する時刻より十分後の `not_before`（たとえば翌日の 03:00 UTC）を指定して、すべてのレプリカに追加します。
    ```json
    "keys": [
@@ -53,7 +53,7 @@ services:
 
 鍵の `id` やシークレットをその場で変更することは決してしないでください。どのウィンドウでどの鍵を使うかについて、すべてのレプリカの認識が一致していなければならないからです。`not_before` が未来にある鍵の追加は、それ以前にその鍵を使うレプリカがないため、ローリングアップデート中でも安全です。展開が `not_before` より前に完了するようにしてください。
 
-**緊急時（鍵が露出した場合）:** `not_before` = 現在時刻 + 展開にかかる時間 として新しい鍵を追加し、展開してから、古い鍵を削除します。古い鍵から導出されたパスワードは、そのウィンドウが終了した時点（PostgreSQL）、または次の発行やスイープで置き換えられた時点（MySQL、Redis）で使えなくなります。PostgreSQL で即座に遮断するには、影響を受けるロールに `ALTER ROLE … VALID UNTIL 'now'` を実行してください（クライアントは認証情報を再取得します）。
+**緊急時（鍵が露出した場合）:** `not_before` = 現在時刻 + 展開にかかる時間 として新しい鍵を追加し、展開します。古い鍵を削除するのは、新しい鍵の `not_before` が **少なくとも 1 ウィンドウ過去になってから** にしてください（起動時には、設定された最も古い鍵が 1 ウィンドウ全体にわたって有効であることが求められます）。古い鍵から導出されたパスワードは、そのウィンドウが終了した時点（PostgreSQL）、または次の発行やスイープで置き換えられた時点（MySQL、Redis）で使えなくなります。PostgreSQL で即座に遮断するには、影響を受けるロールに `ALTER ROLE … VALID UNTIL 'now'` を実行してください（クライアントは認証情報を再取得します）。あわせて、既存のセッションも終了させてください（下記を参照）。失効によって開いている接続が閉じられることはありません。
 
 ## ウィンドウの変更
 
@@ -82,7 +82,7 @@ services:
 
 | 侵害が疑われる対象 | 対応 |
 | --- | --- |
-| アプリケーション | その `apps` エントリーを削除（またはトークンハッシュを置き換え）して展開します。これで、そのアプリケーションは認証情報を取得できなくなります。すでに保持している認証情報は 1 ウィンドウ以内に失効します（MySQL/Redis ではさらにスイープ 1 回分）。その `app` の `msg=credential` を確認し、どのテナントにアクセスしたかを調べてください。 |
+| アプリケーション | その `apps` エントリーを削除（またはトークンハッシュを置き換え）して展開します。これで、そのアプリケーションは認証情報を取得できなくなります。すでに保持している認証情報は、最大で 1 ウィンドウと `renew_before` の間、新規接続に使えます（MySQL/Redis ではさらにスイープ 1 回分）。**開いている接続は失効によって閉じられません**。影響を受けるアカウントの接続を終了させてください（PostgreSQL では `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 't_acme'`、MySQL では `SHOW PROCESSLIST` から `KILL <id>`、Redis ではすべてのサーバーで `CLIENT KILL USER t_acme`）。その `app` の `msg=credential` を確認し、どのテナントにアクセスしたかを調べてください。 |
 | ゲートウェイ鍵 | `gateway_keys` からその鍵を削除して展開し、ゲートウェイに新しい鍵をデプロイします。 |
 | ジョブ発行者（スケジューラー）の鍵 | `job_tickets.trusted_issuers` から削除して展開します。その鍵で署名されたチケットは即座に使えなくなります。 |
 | tenant-pass 自身のジョブ用の鍵 | `job_tickets.signing_key` を（新しい `id` で）置き換えて展開します。発行済みで有効期限内のチケットは使えなくなるため、ジョブは新しいチケットを入手しなければなりません。 |
@@ -90,6 +90,18 @@ services:
 | ローテーション鍵 | 上記の「緊急時」を参照してください。あわせて、想定外のアドレスからのログインがないかストアのログを確認してください。 |
 | tenant-pass ホスト | すべてのテナントが露出したものとして扱ってください。ローテーション鍵、ストアの管理者パスワード、TLS 鍵をローテーションし、ストアのログを確認してください。 |
 | ストアの管理者パスワード | ストアとシークレットファイルの両方でパスワードを変更し、レプリカを再起動してください。 |
+
+## リリースの検証
+
+リリースイメージは `.github/workflows/release.yml` によってビルドされ、SBOM と SLSA の来歴（provenance）付きでプッシュされ、Sigstore（キーレス）で署名されます。デプロイ前に検証してください。
+
+```sh
+cosign verify ghcr.io/kobesoft-labs/tenant-pass:<version> \
+  --certificate-identity-regexp '^https://github.com/kobesoft-labs/tenant-pass/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+タグではなくダイジェスト（`ghcr.io/…@sha256:…`）でデプロイしてください。
 
 ## アップグレード
 

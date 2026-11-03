@@ -12,10 +12,12 @@
 //
 //	password(n) = base64url( HMAC-SHA256( K, "tenant-pass/v1/password" ||
 //	                         LP(store) || LP(node) || LP(account) ||
-//	                         LP(key ID) || BE64(n) ) )
+//	                         LP(key ID) || BE64(W) || BE64(n) ) )
 //
-// where n is the window number, K is the rotation key in force at the
-// start of window n, LP(x) is a 4-byte big-endian length followed by x,
+// where n is the window number, W the window length in seconds (so that
+// changing the window length can never make a new window reuse an old
+// window's number, and thereby its password), K is the rotation key in
+// force at the start of window n, LP(x) is a 4-byte big-endian length followed by x,
 // and BE64 is a big-endian 64-bit integer. Length prefixes make the
 // encoding injective: no two different input tuples can produce the same
 // HMAC input.
@@ -40,6 +42,7 @@
 package rotation
 
 import (
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -238,6 +241,7 @@ func (s *Schedule) derive(ctx context.Context, label string, a Account, n int64)
 	msg = append(msg, label...)
 	msg = append(msg, a.bytes()...)
 	msg = appendLP(msg, k.ID)
+	msg = binary.BigEndian.AppendUint64(msg, uint64(s.Window/time.Second))
 	msg = binary.BigEndian.AppendUint64(msg, uint64(n))
 
 	ck := string(msg)
@@ -277,28 +281,60 @@ func (s *Schedule) Salt(ctx context.Context, a Account, n int64) ([]byte, error)
 	return sum, err
 }
 
-// deriveCache is a small, bounded, expiring map.
+// LockName returns an unpredictable, stable name for a store-side lock on
+// account a: hex(HMAC(K0, "tenant-pass/v1/lock" || A))[:32], where K0 is
+// the earliest configured key. Store lock namespaces (MySQL GET_LOCK) are
+// shared with tenants; a predictable name would let any tenant hold the
+// lock for another tenant's account and block its rotation.
+func (s *Schedule) LockName(ctx context.Context, a Account) (string, error) {
+	k := s.keys[0]
+	msg := append([]byte("tenant-pass/v1/lock"), a.bytes()...)
+	ck := "lock:" + string(msg)
+	if v, ok := s.cache.get(ck); ok {
+		return string(v), nil
+	}
+	sum, err := k.MAC.MAC(ctx, msg)
+	if err != nil {
+		return "", fmt.Errorf("rotation: key %q: %w", k.ID, err)
+	}
+	name := fmt.Sprintf("%x", sum[:16])
+	s.cache.put(ck, []byte(name), time.Now().Add(24*time.Hour))
+	return name, nil
+}
+
+// deriveCache is a bounded, expiring LRU map. With many accounts a
+// "clear everything when full" policy would repeatedly drop the whole
+// cache and, with a remote key, turn every sweep into a burst of KMS
+// calls; LRU eviction drops only the least recently used values.
 type deriveCache struct {
-	mu sync.Mutex
-	m  map[string]cacheEntry
+	mu  sync.Mutex
+	m   map[string]*list.Element
+	lru *list.List // front = most recently used
 }
 
 type cacheEntry struct {
+	k   string
 	v   []byte
 	exp time.Time
 }
 
-// maxCacheEntries bounds the cache. At 2 values per account and window
-// and up to 4 windows, this covers several thousand active accounts.
-const maxCacheEntries = 50000
+// maxCacheEntries bounds the cache (about 8 values per active account).
+const maxCacheEntries = 200000
 
 func (c *deriveCache) get(k string) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.m[k]
-	if !ok || time.Now().After(e.exp) {
+	el, ok := c.m[k]
+	if !ok {
 		return nil, false
 	}
+	e := el.Value.(*cacheEntry)
+	if time.Now().After(e.exp) {
+		c.lru.Remove(el)
+		delete(c.m, k)
+		return nil, false
+	}
+	c.lru.MoveToFront(el)
 	// Return a copy: callers must not be able to corrupt cached values.
 	return append([]byte(nil), e.v...), true
 }
@@ -307,20 +343,21 @@ func (c *deriveCache) put(k string, v []byte, exp time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.m == nil {
-		c.m = make(map[string]cacheEntry)
+		c.m = make(map[string]*list.Element)
+		c.lru = list.New()
 	}
-	if len(c.m) >= maxCacheEntries {
-		now := time.Now()
-		for key, e := range c.m {
-			if now.After(e.exp) {
-				delete(c.m, key)
-			}
-		}
-		if len(c.m) >= maxCacheEntries {
-			clear(c.m) // still full: start over rather than grow
-		}
+	if el, ok := c.m[k]; ok {
+		el.Value.(*cacheEntry).v = append([]byte(nil), v...)
+		el.Value.(*cacheEntry).exp = exp
+		c.lru.MoveToFront(el)
+		return
 	}
-	c.m[k] = cacheEntry{v: append([]byte(nil), v...), exp: exp}
+	c.m[k] = c.lru.PushFront(&cacheEntry{k: k, v: append([]byte(nil), v...), exp: exp})
+	for c.lru.Len() > maxCacheEntries {
+		old := c.lru.Back()
+		c.lru.Remove(old)
+		delete(c.m, old.Value.(*cacheEntry).k)
+	}
 }
 
 // CheckCurrentKey returns an error if no key is in force right now (for

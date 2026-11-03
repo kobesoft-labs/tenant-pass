@@ -87,7 +87,8 @@ JWKS の扱い: 使われるのは `kid` を持つ署名用の公開鍵だけで
     "authorization_header": true,
     "cookie": "session",
     "tenant_claim": "tenant_id",
-    "leeway": "30s"
+    "leeway": "30s",
+    "cookie_fetch_metadata": "enforce"
   },
   "routes": [{"host": "{tenant}.billing.example.com", "app": "billing"}],
   "unauthenticated": "pass_through",
@@ -100,7 +101,8 @@ JWKS の扱い: 使われるのは `kid` を持つ署名用の公開鍵だけで
 | キー | デフォルト | 説明 |
 | --- | --- | --- |
 | `listen` | `127.0.0.1:9180` | 待ち受けアドレス。 |
-| `tls` | | `cert_file`、`key_file`。`client_ca_file` を設定するとクライアント証明書が **必須** になります（プロキシだけが呼び出せるようになります）。 |
+| `tls` | | `cert_file`、`key_file`。`client_ca_file` を設定するとクライアント証明書が **必須** になり、その場合は `client_uris` と `client_dns_names` の一方または両方でプロキシを指定しなければなりません。CA が発行した証明書は、その SAN のいずれかが一致する場合にだけ受け入れられます（サービスメッシュでは、アプリケーションを含むすべてのワークロードが同じ CA の証明書を持っています）。 |
+| `health_listen` | | `GET /healthz` 用の任意のアドレス。フォワード認証のリスナーはすべてのパスを認可リクエストとして扱うため、ヘルスチェック用のパスを持ちません。 |
 | `insecure_plaintext_http` | `false` | 平文の HTTP。ループバックアドレス上（プロキシの隣のサイドカー）では許可されます。それ以外では `allow_insecure_plaintext` が必要です（テスト専用）。 |
 | `caller_secret_file` | | 設定した場合、呼び出し元はこの値を `Tenant-Pass-Gateway-Secret` で送らなければなりません（16 文字以上）。`listen` がループバック以外の場合は、`caller_secret_file` または `tls.client_ca_file` が**必須**です。 |
 | `kms.vault` | | Vault/OpenBao への接続。[kms.md](kms.md) を参照してください。 |
@@ -151,7 +153,7 @@ location = /_tenant_pass_auth {
     proxy_set_header X-Forwarded-Uri $request_uri;
     proxy_set_header Authorization $http_authorization;
     proxy_set_header Cookie $http_cookie;
-    proxy_set_header Tenant-Pass-Gateway-Secret "<secret>";
+    include /etc/nginx/tenant-pass-secret.conf;   # proxy_set_header Tenant-Pass-Gateway-Secret "..."; (mode 0600)
 }
 
 location / {
@@ -159,11 +161,14 @@ location / {
     auth_request_set $tenant_pass $upstream_http_tenant_pass;
     # Always set: an empty value removes any client-supplied header.
     proxy_set_header Tenant-Pass $tenant_pass;
+    proxy_set_header X-Forwarded-Host $host;   # never pass on a client-supplied value
     proxy_pass http://billing:8080;
 }
 ```
 
 ### Traefik
+
+Traefik の ForwardAuth は、認可リクエストだけにヘッダーを追加することができません（headers ミドルウェアを使うとアプリケーションにも送られてしまいます）。そのため、Traefik では `caller_secret_file` を安全に使えません。ループバック以外では mTLS を使ってください。クライアント証明書を設定した `forwardAuth.tls` と、ゲートウェイ側の `client_ca_file` および `client_uris`/`client_dns_names` です。
 
 ```yaml
 http:
@@ -172,11 +177,12 @@ http:
       headers:
         customRequestHeaders:
           Tenant-Pass: ""          # removes the client's header
+          Tenant-Pass-User: ""     # and every forward_claims header
     tenant-pass:
       forwardAuth:
         address: http://127.0.0.1:9180/
-        authResponseHeaders: ["Tenant-Pass"]
-        authRequestHeaders: ["Authorization", "Cookie", "X-Forwarded-Host"]
+        authResponseHeaders: ["Tenant-Pass", "Tenant-Pass-User"]
+        authRequestHeaders: ["Authorization", "Cookie", "X-Forwarded-Host", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-User"]
   routers:
     billing:
       rule: HostRegexp(`^[a-z0-9-]+\.billing\.example\.com$`)
@@ -186,16 +192,20 @@ http:
 
 ### Envoy（ext_authz、HTTP）
 
-`request.host_header` を `Host` に設定し、`allowed_headers` で `authorization` と `cookie` を許可し、`allowed_upstream_headers` に `tenant-pass` を追加し、ルートの `request_headers_to_remove` で受信リクエストから `tenant-pass` を取り除いてください。
+`request.host_header` を `Host` に設定してください。ext_authz フィルターでは、`allowed_headers` で `authorization`、`cookie`、`sec-fetch-site`、`sec-fetch-mode`、`sec-fetch-user` を許可し、`allowed_upstream_headers` に `tenant-pass`（およびすべての `forward_claims` のヘッダー）を追加してください。
+
+クライアントが送った `tenant-pass` と ID のヘッダーは、ext_authz フィルターが実行される **前に** 取り除いてください。HTTP フィルターチェーンで ext_authz より前に header-mutation フィルターを置いて行います。ルートの `request_headers_to_remove` は使わないでください。これは ext_authz の後に適用されるため、ゲートウェイのパスまで取り除いてしまいます。また、コネクションマネージャーで `headers_with_underscores_action: REJECT_REQUEST` を設定し、アンダースコアをダッシュに正規化するアプリケーションに `tenant_pass` が届かないようにしてください。
 
 本番運用を始める前にプロキシを検証してください。セッションが **なく**、偽造した `Tenant-Pass` ヘッダーが **ある** リクエストは、そのヘッダーを持たない状態でアプリケーションに届かなければなりません。
+
+どのプロキシでも、アプリケーションへのリクエストには `X-Forwarded-Host` を **設定** してください（クライアントが送った値をそのまま渡してはなりません）。また、アプリケーションはテナントを認証情報のレスポンス（`tenant`）からだけ取得し、決してホストヘッダーから取得しないようにしてください。
 
 ## セッショントークンをアプリケーションに渡さない
 
 侵害されたアプリケーションによるセッショントークンのリプレイを防ぐ最も確実な方法は、そもそもトークンを渡さないことです。`identity.forward_claims` を設定すると、ゲートウェイは検証済みのクレームを（パスと一緒の場合だけ）ヘッダーで返し、プロキシはトークンの代わりにそれを転送します。
 
 ```json
-"identity": { "...": "...", "forward_claims": {"Tenant-Pass-User": "sub", "Tenant-Pass-Email": "email"} }
+"identity": { "...": "...", "forward_claims": {"Tenant-Pass-User": "sub"} }
 ```
 
 ```caddyfile
@@ -214,9 +224,25 @@ route {
 
 （Caddy 2 で検証済みです。アプリケーションはパスと `Tenant-Pass-User` を受け取り、`Authorization` は受け取りません。クライアントが送った `Tenant-Pass-User` ヘッダーは取り除かれます。）
 
+`sub` のような、プロバイダーが管理する安定した識別子を転送してください。`email` など、ユーザーが変更できる（または未検証の可能性がある）クレームを ID として転送しないでください。ただし、`required_claims` で `email_verified` も要求する場合は除きます。
+
 決まり: 転送するクレームは、印字可能な ASCII の文字列（256 バイト以下）でなければなりません。存在しない、または安全でない場合、そのトークンは無効として扱われ、パスは発行されません。`Authorization`、`Cookie`、`Host` などのヘッダー名は拒否されます。`Tenant-Pass` と同様に、**転送するすべてのヘッダー名を、プロキシでクライアントのリクエストから取り除いてください**。
 
 Cookie によるセッションの場合は、ID プロバイダーのセッション専用の Cookie を使い、プロキシでそれを取り除いてください（nginx: `$http_cookie` を書き換える。Caddy: 正規表現で置換する `request_header`）。こうすると、アプリケーションは自身の Cookie を使い続けられますが、IdP のセッションは見えません。
+
+## Cookie セッションと Fetch Metadata
+
+ブラウザーは、ページが兄弟ホストに対して発生させたリクエストにも Cookie を付けます。追加のチェックがなければ、`acme.billing.example.com` 上の侵害されたアプリケーションは、ユーザーが属するすべてのテナントについて `<img src="https://t2.billing.example.com/…">` を埋め込めてしまいます。プロキシは、それぞれのリクエストをそのテナントのパスと一緒に、同じ侵害されたアプリケーションへ転送することになります。
+
+`identity.cookie_fetch_metadata: "enforce"`（デフォルト）の場合、**Cookie** から得たトークンは、ブラウザーの Fetch Metadata ヘッダーが次のいずれかを示す場合にだけ使われます。
+
+- `Sec-Fetch-Site: same-origin`（ページが同じホスト上にある）
+- `Sec-Fetch-Site: none`（ユーザーがアドレスを入力した、またはブックマークを使った）
+- ユーザーが起動したトップレベルのナビゲーション: `Sec-Fetch-Mode: navigate` **かつ** `Sec-Fetch-User: ?1`（リンクのクリック。1 回のクリックで 1 テナントであり、ユーザーから見えます）
+
+それ以外（別のホストからの画像、スクリプト、fetch、リダイレクト、スクリプトによるナビゲーション、または Fetch Metadata ヘッダーがまったくない場合）は、セッションがないものとして扱われ、パスは発行されません。`Authorization` ヘッダーのトークンには影響しません（ブラウザーはこれを自動的には送りません）。セッション名の Cookie が複数ある場合も、セッションがないものとして扱われます（そうしないと、兄弟ホストから投げ込まれた Cookie によって、ユーザーが攻撃者のセッションにログインさせられる可能性があります）。
+
+プロキシは `Sec-Fetch-*` ヘッダーをゲートウェイに渡さなければなりません（Caddy と nginx はデフォルトで渡します。Traefik と Envoy については上記を参照してください）。`"off"` は、Cookie を使うブラウザー以外のクライアントの場合にだけ設定してください。
 
 ## 残存リスク
 

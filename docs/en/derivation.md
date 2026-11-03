@@ -32,8 +32,8 @@ Each rotation key has an ID and a `not_before` time. Window `n` uses the key wit
 With `K` the selected key's secret and `id` its ID:
 
 ```
-password(n) = base64url_nopad( HMAC-SHA256(K, "tenant-pass/v1/password" || A || LP(id) || BE64(n)) )   → 43 chars
-salt(n)     =                  HMAC-SHA256(K, "tenant-pass/v1/salt"     || A || LP(id) || BE64(n))     → 32 bytes
+password(n) = base64url_nopad( HMAC-SHA256(K, "tenant-pass/v1/password" || A || LP(id) || BE64(W) || BE64(n)) )   → 43 chars
+salt(n)     =                  HMAC-SHA256(K, "tenant-pass/v1/salt"     || A || LP(id) || BE64(W) || BE64(n))     → 32 bytes
 ```
 
 The salt is used by stores that hash passwords on the client side:
@@ -56,23 +56,23 @@ Key secret: bytes `00 01 02 … 1f` (32 bytes). Key ID `k1`, `not_before` before
 
 | store / node / account | offset | n | Start | password(n) |
 | --- | --- | --- | --- | --- |
-| postgres / pg1 / t_acme | 539 | 1993007 | 1793706839 | `umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM` |
-| mysql / my1 / t_acme | 601 | 1993007 | 1793706901 | `lRJgB4tM38aEGO4myi2zfoNWJK1vHuH-yu08BLhnjoU` |
-| redis / rd1 / t_acme | 86 | 1993007 | 1793706386 | `tCGHXsj_Vw3vLJeWcto3NlgDT5WlxI3kq_yAAHsajeg` |
+| postgres / pg1 / t_acme | 539 | 1993007 | 1793706839 | `lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE` |
+| mysql / my1 / t_acme | 601 | 1993007 | 1793706901 | `e1J8ptbuAhJdMRKoN64HY-aPS_M_8qT5JBYJPCuixDg` |
+| redis / rd1 / t_acme | 86 | 1993007 | 1793706386 | `10MHE6qMKh6XzzFzHwmXBvgWoezTwvsUYb91z3guUHc` |
 
 Salts (hex):
 
-- postgres: `ad3ceaff85f2029e16b5cf5890e411627895fe6d5367e8fc9818f4cd3b8ac398`
-- mysql: `fa0dfbe05a2c07ae34e8eeec3d7a69aeaa9b60ab100db11c12d05615995b40f6`
-- redis: `c493c646278a7ec0e7d27fe9acc557c08f7e8842fead295a7ef5a3107f9f0a84`
+- postgres: `abf9ab9a389f481fee4908dd172c9cccbadfec535752012f6409fd656d729d1a`
+- mysql: `b810862d689e69fa9b9e7505734ead2377cc468d2c81eeb6f48c7fc2556b8034`
+- redis: `51ffc4190e3dc0774a7711bf75a433650b3d7d0235b8c879ec569274e11ff1b5`
 
 PostgreSQL SCRAM verifier for the postgres row:
 
 ```
-SCRAM-SHA-256$4096:rTzq/4XyAp4Wtc9YkOQRYg==$dwzLPDwP/7CwnPhHw/zWb7+XLxlpfEhoPyPLHE7dO9M=:7ljzKIBLT3xRViFwPrWVsXfr5RljubwmeqecuseE4yU=
+SCRAM-SHA-256$4096:q/mrmjifSB/uSQjdFyyczA==$1vO+SFZOWRWMJtkvT14UZD23M4IOBqVfMP6JjpxyVnA=:LKeE/8nXPt7v7OoC/qRpjmb66Fd0fA5wclO1IK9ZOII=
 ```
 
-Redis ACL hash for the redis row: `bd4475de5ef98729dc284dc27d1add155bb43ee7e74f34c45631e5fc3ffbb501`.
+Redis ACL hash for the redis row: `181dc3a4def9e83202b8ec73eb06014c09a45f58e3637756857dd1a1b47b6278`.
 
 The MySQL SHA-crypt implementation is tested against OpenSSL (`openssl passwd -5`) and against hashes produced by a real MySQL 8.4 server (`internal/pwhash/pwhash_test.go`).
 
@@ -82,4 +82,5 @@ The MySQL SHA-crypt implementation is tested against OpenSSL (`openssl passwd -5
 - Distinct labels (`password`, `salt`, `offset`) separate the uses of the key and the hash.
 - The store type is part of the input, so the same account name on a PostgreSQL and a Redis node gets unrelated passwords even under the same key.
 - The key ID is part of the input, so renaming a key changes every password derived from it.
+- The window length `W` is part of the input, so changing `rotation.window` can never make a new window reuse an old window's number and therefore its password.
 - Anyone holding `K` can compute any password derived from it. Protect rotation keys accordingly, and rotate them if exposure is suspected.

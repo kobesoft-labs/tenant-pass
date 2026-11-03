@@ -42,7 +42,7 @@ tenant-pass を使うと、次のようになります。
 - **被害範囲をレート制限。** 各アプリケーションが 1 分あたりに認証情報を取得できる *異なる* テナントの数は限られています。
 - **有効期限はデータベースが強制。** PostgreSQL は、tenant-pass が停止していても `VALID UNTIL` 以降はそのパスワードを拒否します。MySQL と Redis にはネイティブの有効期限がないため、tenant-pass は最大 2 ウィンドウ分のパスワードだけを保持し、期限切れのものをスイープします。
 - **データベースへの通信路に平文を流さない。** tenant-pass が送るのは SCRAM ベリファイア（PostgreSQL）、`caching_sha2_password` ハッシュ（MySQL）、SHA-256 ACL ハッシュ（Redis）です。パスワードがデータベースのログ、ステートメント統計、レプリケーションストリームに現れることはありません。
-- **危険なアカウントは拒否。** tenant-pass は、明示的に管理対象としてマークされたアカウントだけを変更します。管理者権限やテナント横断の権限（ロールメンバーシップを通じて継承される権限を含む）を持つアカウントには、ディレクトリがそれを指していても決して手を触れません。
+- **危険なアカウントは拒否。** tenant-pass は、明示的に管理対象としてマークされたアカウントだけを変更します。管理者権限やサーバー全体に及ぶ権限（ロールメンバーシップを通じて継承される権限を含む）を持つアカウントには、ディレクトリがそれを指していても決して手を触れません。（他のテナントのオブジェクトに対する権限付与は一般には検出できません。各テナントの権限付与をそのテナント自身のオブジェクトに限ることは、プロビジョニング側の責任です。）
 - **自分の時計ではなくデータベースの時計を信頼。** 書き込みの前に、各レプリカは自分の時計をストアサーバーの時計と比較します。時計が狂っているレプリカは、パスワードを未来へ押し進めるのではなく、処理を拒否します。
 
 これは汎用のシークレットマネージャーではありません。リクエストへの束縛なしに動的な認証情報が必要であれば、HashiCorp Vault / OpenBao のデータベースシークレットエンジンを検討してください。tenant-pass が対象とするのは、より限定された 1 つのケース、すなわちマルチテナント SaaS における **リクエストに束縛された、テナント単位の** アクセスです。
@@ -52,7 +52,7 @@ tenant-pass を使うと、次のようになります。
 | | PostgreSQL | MySQL | Redis / Valkey |
 | --- | --- | --- | --- |
 | アカウント | ロール | ユーザー | ACL ユーザー |
-| 対応バージョン | 13 以降（16 以降を強く推奨） | 8.0.27 以降、8.4、9.x | Redis 7.0 以降、Valkey 7.2 以降 |
+| 対応バージョン | 16 以降 | 8.0.27 以降、8.4、9.x | Redis 7.0 以降、Valkey 7.2 以降 |
 | 送信するもの | SCRAM-SHA-256 ベリファイア | caching_sha2_password ハッシュ | SHA-256 ACL ハッシュ |
 | 有効期限 | ハード（`VALID UNTIL`） | ソフト（デュアルパスワード + スイーパー） | ソフト（複数パスワード + スイーパー） |
 | ローテーション時の重複期間 | なし（クライアントが 1 回リトライ） | 新旧どちらも有効 | 新旧どちらも有効 |
@@ -79,7 +79,7 @@ go install github.com/kobesoft-labs/tenant-pass/cmd/tenant-pass-gateway@latest  
 tenant-pass gen-gateway-key -private gw.key -public gw.pub
 
 # Rotation key (tenant-pass only)
-tenant-pass gen-rotation-key -out rotation.key
+tenant-pass gen-rotation-key -out rotation.key   # *.key files are git- and docker-ignored
 
 # Application token: give the token to the application, put the hash in the config
 tenant-pass gen-app-token
@@ -88,7 +88,10 @@ tenant-pass gen-app-token
 1 つのテナント用に PostgreSQL ロールを準備します（[詳細な手順](docs/ja/stores/postgres.md)）。
 
 ```sql
+CREATE DATABASE tenant_pass;                                  -- tenant-pass's own database
+REVOKE ALL ON DATABASE tenant_pass FROM PUBLIC;               -- tenants must not connect to it
 CREATE ROLE tenant_pass_admin LOGIN CREATEROLE PASSWORD '...';
+GRANT CONNECT ON DATABASE tenant_pass TO tenant_pass_admin;
 CREATE ROLE tenant_pass_managed NOLOGIN;
 CREATE ROLE t_acme LOGIN IN ROLE tenant_pass_managed;
 GRANT t_acme TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
@@ -111,7 +114,7 @@ curl -s https://tenant-pass.internal:8443/v1/credentials \
 {
   "tenant": "acme", "store": "postgres",
   "host": "pgbouncer.internal", "port": 6432, "database": "app",
-  "username": "t_acme", "password": "umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM",
+  "username": "t_acme", "password": "lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE",
   "expires_at": "2026-11-03T12:13:59Z", "refresh_at": "2026-11-03T12:08:59Z"
 }
 ```

@@ -28,13 +28,14 @@ def offset(store, node, name, window_s):
     return struct.unpack(">Q", h[:8])[0] % window_s
 
 
-def derive(label, secret, key_id, store, node, name, n):
-    msg = label.encode() + account(store, node, name) + lp(key_id) + struct.pack(">q", n)
+def derive(label, secret, key_id, store, node, name, n, window_s):
+    msg = (label.encode() + account(store, node, name) + lp(key_id)
+           + struct.pack(">Q", window_s) + struct.pack(">q", n))
     return hmac.new(secret, msg, hashlib.sha256).digest()
 
 
-def password(secret, key_id, store, node, name, n):
-    d = derive("tenant-pass/v1/password", secret, key_id, store, node, name, n)
+def password(secret, key_id, store, node, name, n, window_s):
+    d = derive("tenant-pass/v1/password", secret, key_id, store, node, name, n, window_s)
     return base64.urlsafe_b64encode(d).rstrip(b"=").decode()
 
 
@@ -55,8 +56,8 @@ if __name__ == "__main__":
         off = offset(store, node, name, window)
         t = 1793707200  # 2026-11-03T12:00:00Z
         n = (t - off) // window
-        pw = password(secret, key_id, store, node, name, n)
-        salt = derive("tenant-pass/v1/salt", secret, key_id, store, node, name, n)
+        pw = password(secret, key_id, store, node, name, n, window)
+        salt = derive("tenant-pass/v1/salt", secret, key_id, store, node, name, n, window)
         print(f"{store}/{node}/{name}: offset={off} n={n} start={n*window+off} password={pw}")
         print(f"  salt={salt.hex()}")
         if store == "postgres":

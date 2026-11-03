@@ -37,9 +37,9 @@ func TestVectors(t *testing.T) {
 		password string
 		salt     string
 	}{
-		{Account{"postgres", "pg1", "t_acme"}, 1793706839, "umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM", "ad3ceaff85f2029e16b5cf5890e411627895fe6d5367e8fc9818f4cd3b8ac398"},
-		{Account{"mysql", "my1", "t_acme"}, 1793706901, "lRJgB4tM38aEGO4myi2zfoNWJK1vHuH-yu08BLhnjoU", "fa0dfbe05a2c07ae34e8eeec3d7a69aeaa9b60ab100db11c12d05615995b40f6"},
-		{Account{"redis", "rd1", "t_acme"}, 1793706386, "tCGHXsj_Vw3vLJeWcto3NlgDT5WlxI3kq_yAAHsajeg", "c493c646278a7ec0e7d27fe9acc557c08f7e8842fead295a7ef5a3107f9f0a84"},
+		{Account{"postgres", "pg1", "t_acme"}, 1793706839, "lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE", "abf9ab9a389f481fee4908dd172c9cccbadfec535752012f6409fd656d729d1a"},
+		{Account{"mysql", "my1", "t_acme"}, 1793706901, "e1J8ptbuAhJdMRKoN64HY-aPS_M_8qT5JBYJPCuixDg", "b810862d689e69fa9b9e7505734ead2377cc468d2c81eeb6f48c7fc2556b8034"},
+		{Account{"redis", "rd1", "t_acme"}, 1793706386, "10MHE6qMKh6XzzFzHwmXBvgWoezTwvsUYb91z3guUHc", "51ffc4190e3dc0774a7711bf75a433650b3d7d0235b8c879ec569274e11ff1b5"},
 	}
 	for _, c := range cases {
 		n := s.Index(c.acc, now)
@@ -133,6 +133,19 @@ func TestDomainSeparation(t *testing.T) {
 	p5, _, _ := s.Password(context.Background(), Account{"postgres", "a", "bc"}, n)
 	if p1 == p2 || p1 == p3 || p4 == p5 {
 		t.Fatal("derivation inputs are not separated")
+	}
+}
+
+// Changing the window length must never make a new window reuse an old
+// window's password (window numbers collide across lengths).
+func TestWindowLengthInDerivation(t *testing.T) {
+	a := Account{"postgres", "pg1", "t"}
+	s1, _ := NewSchedule(15*time.Minute, 5*time.Minute, []Key{{ID: "k1", MAC: kms.NewLocalMAC(testSecret())}})
+	s2, _ := NewSchedule(16*time.Minute, 5*time.Minute, []Key{{ID: "k1", MAC: kms.NewLocalMAC(testSecret())}})
+	p1, _, _ := s1.Password(context.Background(), a, 1000)
+	p2, _, _ := s2.Password(context.Background(), a, 1000)
+	if p1 == p2 {
+		t.Fatal("same window number under different lengths gives the same password")
 	}
 }
 

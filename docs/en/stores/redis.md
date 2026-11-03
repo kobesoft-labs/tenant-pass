@@ -49,14 +49,14 @@ Before issuing, on every server, tenant-pass refuses (audit `account_refused`) u
 
 - the user name matches `account_pattern` and `[A-Za-z0-9_.:-]{1,128}`, and is not `default`;
 - the user exists (tenant-pass never creates users) and carries the managed marker;
-- **`ACL DRYRUN`** reports that the user can run none of: `ACL …`, `CONFIG …`, `MODULE …`, `DEBUG`, `SHUTDOWN`, `FLUSHALL`, `FLUSHDB`, `SWAPDB`, `KEYS`, `CLIENT KILL/LIST/PAUSE`, `SCRIPT FLUSH`, `FUNCTION LOAD/DELETE/FLUSH`, `REPLICAOF`, `SLAVEOF`, `FAILOVER`, `CLUSTER …`, `SAVE`, `BGSAVE`, `BGREWRITEAOF`, `MONITOR`, `SYNC`, `PSYNC`, `SLOWLOG RESET`, `LATENCY RESET`, `MEMORY PURGE`;
-- **`ACL DRYRUN`** reports that the user cannot `GET`/`SET` a random key or `PUBLISH`/`SUBSCRIBE` to a random channel (that is, its key and channel patterns are restricted);
+- **`ACL DRYRUN`** reports that the user can run none of: `ACL …`, `CONFIG …`, `MODULE …`, `DEBUG`, `SHUTDOWN`, `FLUSHALL`, `FLUSHDB`, `SWAPDB`, `KEYS`, `CLIENT KILL/LIST/PAUSE`, `SCRIPT FLUSH`, `FUNCTION LOAD/DELETE/FLUSH`, `REPLICAOF`, `SLAVEOF`, `FAILOVER`, `CLUSTER …`, `SAVE`, `BGSAVE`, `BGREWRITEAOF`, `MONITOR`, `SYNC`, `PSYNC`, `SLOWLOG RESET`, `LATENCY RESET`, `MEMORY PURGE`, and the commands that see every key or channel name regardless of key patterns: `SCAN`, `RANDOMKEY`, `PUBSUB CHANNELS/SHARDCHANNELS`, `DBSIZE`, `OBJECT`;
+- **`ACL DRYRUN`** reports that the user cannot `GET`/`SET` random keys or `PUBLISH`/`SUBSCRIBE` to random channels, probed with names starting with many different characters, so that partial patterns such as `~[a-s]*` are caught too (that is, its key and channel patterns are restricted to its own prefix);
 - a static check of the rule text finds no `allcommands`, `allkeys`, `+@all`, `+@admin`, `+@dangerous`, or explicit grants of the commands above;
 - the server's `TIME` agrees with the replica's clock within `rotation.max_clock_skew`.
 
 `ACL DRYRUN` evaluates the user's *effective* permissions, including categories and selectors. This matters: categories such as `@slow` contain `ACL` and `CONFIG`. Grant tenants individual commands or narrow categories (`@read`, `@write`, `@string`, `@hash`, …).
 
-The sweeper only removes passwords, so it checks the marker but skips the `DRYRUN` probes.
+The sweeper only removes passwords. It sweeps **each server separately** (a user missing on one server, or one unreachable server, does not stop the others from being swept), and it never touches users without the marker or users that fail the static privilege check; it skips the more expensive `DRYRUN` probes.
 
 ## Node configuration
 

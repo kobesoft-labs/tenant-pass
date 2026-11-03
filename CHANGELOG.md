@@ -22,3 +22,17 @@ All notable changes to this project are documented here. The format follows [Kee
 - Gateway `identity.forward_claims`: forward verified user claims as headers so applications never need the session token; caller authentication (secret or mTLS) is mandatory on non-loopback addresses.
 - Each pass can be exchanged for at most one job ticket (per replica).
 - Documentation in English and Japanese.
+
+### Security (third review)
+
+- Reject small-order and non-canonical Ed25519 public keys (gateway keys, job ticket issuers, Transit keys): a degenerate key would let anyone forge passes.
+- Trust anchors (public keys, CA bundles, certificates, JWKS, configuration) get the same integrity checks as secrets, including file owner; files are opened once and checked on the open descriptor; TLS key pairs are loaded from the checked bytes.
+- Strict JSON: object keys must match field names exactly (Go's case-insensitive matching, including Unicode folding, re-opened parser differentials).
+- Derivation now includes the window length, so changing `rotation.window` cannot revive old passwords. (Test vectors changed.)
+- PostgreSQL: requires 16+, a dedicated admin database that tenants cannot connect to (advisory-lock contention by tenants), and refuses ADMIN OPTION held through parent roles.
+- MySQL: wildcard database grants matching system schemas are refused; the managed role must be empty; lock names are unpredictable; the server clock is read time-zone independently.
+- Redis: probes for SCAN/RANDOMKEY/PUBSUB/DBSIZE/OBJECT and partial key patterns; a user deleted mid-check is refused; the sweeper skips privileged users and sweeps each server independently.
+- Gateway: mTLS callers must match pinned SANs; duplicate session cookies are refused; Fetch Metadata enforcement for cookie sessions; no health path on the forward-auth listener.
+- Job tickets: per-application replay quota with FIFO expiry; a pass is released if issuing fails.
+- Ambiguous client certificates (several matching URI SANs) are refused; static directory refuses two tenants sharing an account; LRU derive cache; explicit zero leeway honoured; `check-config` runs every startup check.
+- Release workflow: images pushed with SBOM and SLSA provenance and signed with Sigstore.

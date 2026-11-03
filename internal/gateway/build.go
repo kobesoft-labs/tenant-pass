@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
 
 	"github.com/kobesoft-labs/tenant-pass/internal/config"
 	"github.com/kobesoft-labs/tenant-pass/internal/kms"
@@ -93,4 +94,27 @@ func vaultFromConfig(f *File) (*kms.Vault, error) {
 		}
 	}
 	return kms.NewVault(vc)
+}
+
+// CallerCertCheck returns a tls.Config.VerifyConnection function that
+// accepts only client certificates whose leaf has one of the allowed URI
+// or DNS SANs. It runs after chain verification.
+func CallerCertCheck(uris, dnsNames []string) func(tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		if len(cs.VerifiedChains) == 0 || len(cs.VerifiedChains[0]) == 0 {
+			return errors.New("client certificate required")
+		}
+		leaf := cs.VerifiedChains[0][0]
+		for _, u := range leaf.URIs {
+			if slices.Contains(uris, u.String()) {
+				return nil
+			}
+		}
+		for _, d := range leaf.DNSNames {
+			if slices.Contains(dnsNames, d) {
+				return nil
+			}
+		}
+		return errors.New("client certificate is not an allowed caller")
+	}
 }

@@ -265,8 +265,11 @@ func checkTimes(iat, exp time.Time, maxTTL, hardMax, defMax, leeway time.Duratio
 	if maxTTL > hardMax {
 		maxTTL = hardMax
 	}
-	if leeway <= 0 {
+	switch {
+	case leeway == 0:
 		leeway = DefaultLeeway
+	case leeway < 0:
+		leeway = 0
 	}
 	if exp.Sub(iat) > maxTTL {
 		return fmt.Errorf("%w: lifetime too long", ErrClaims)
@@ -288,8 +291,8 @@ type Verifier struct {
 	// MaxTTL is the largest permitted exp - iat (0 means DefaultMaxTTL).
 	MaxTTL time.Duration
 	// Leeway is the tolerated clock difference for iat (0 means
-	// DefaultLeeway). It is never applied to exp: an expired pass is
-	// expired.
+	// DefaultLeeway; a negative value means no leeway). It is never
+	// applied to exp: an expired pass is expired.
 	Leeway time.Duration
 	// Now returns the current time (nil means time.Now). For tests.
 	Now func() time.Time

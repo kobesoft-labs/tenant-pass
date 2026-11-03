@@ -71,7 +71,7 @@ func canLogin(t *testing.T, user, password string) bool {
 }
 
 var setupStatements = []string{
-	`DROP USER IF EXISTS tenant_pass_admin, t_acme, t_beta, t_super, t_dyn, t_norole, t_global, t_otherrole, t_mysqldb, t_proxy`,
+	`DROP USER IF EXISTS tenant_pass_admin, t_acme, t_beta, t_super, t_dyn, t_norole, t_global, t_otherrole, t_mysqldb, t_proxy, t_wild, t_wild2`,
 	`DROP ROLE IF EXISTS tenant_pass_managed, tp_dba`,
 	`CREATE DATABASE IF NOT EXISTS acme`,
 	// Documented setup (docs/en/stores/mysql.md).
@@ -112,6 +112,12 @@ var setupStatements = []string{
 	`CREATE USER t_proxy IDENTIFIED BY 'x'`,
 	`GRANT tenant_pass_managed TO t_proxy`,
 	`GRANT PROXY ON t_acme TO t_proxy`,
+	"CREATE USER t_wild IDENTIFIED BY 'x'",
+	`GRANT tenant_pass_managed TO t_wild`,
+	"GRANT SELECT ON `%`.* TO t_wild",
+	"CREATE USER t_wild2 IDENTIFIED BY 'x'",
+	`GRANT tenant_pass_managed TO t_wild2`,
+	"GRANT SELECT ON `m_sql`.* TO t_wild2",
 }
 
 func setup(t *testing.T) (*Store, *rotation.Schedule) {
@@ -233,7 +239,7 @@ func TestIntegrationClockSkew(t *testing.T) {
 func TestIntegrationRefusals(t *testing.T) {
 	s, _ := setup(t)
 	for _, u := range []string{"t_super", "t_dyn", "t_norole", "t_missing", "root", "tenant_pass_admin",
-		"t_global", "t_otherrole", "t_mysqldb", "t_proxy"} {
+		"t_global", "t_otherrole", "t_mysqldb", "t_proxy", "t_wild", "t_wild2"} {
 		if _, err := s.Issue(context.Background(), u, false); !errors.Is(err, store.ErrRefused) {
 			t.Errorf("%s: err = %v, want refused", u, err)
 		}

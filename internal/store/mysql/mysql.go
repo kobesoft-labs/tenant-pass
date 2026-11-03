@@ -46,7 +46,6 @@ package mysql
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -259,10 +258,15 @@ func (s *Store) withAccount(ctx context.Context, user string, fn func(*sql.Conn,
 	}
 	defer conn.Close()
 
-	// Named locks are per server and per session. The name is hashed to
-	// stay within MySQL's 64-character limit.
-	h := sha256.Sum256([]byte(user + "@" + s.cfg.AccountHost))
-	lockName := "tenant-pass:" + hex.EncodeToString(h[:16])
+	// Named locks are server-wide and anyone may take any name, so the
+	// name must be unpredictable: otherwise a tenant could hold the lock
+	// for another tenant's account and block its rotation. It is an HMAC
+	// under the rotation key (see rotation.LockName).
+	ln, err := s.sched.LockName(ctx, s.account(user))
+	if err != nil {
+		return err
+	}
+	lockName := "tenant-pass:" + ln
 	var got sql.NullInt64
 	if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK(?, 2)`, lockName).Scan(&got); err != nil {
 		return s.wrap(err)
@@ -290,7 +294,7 @@ func (s *Store) inspect(ctx context.Context, conn *sql.Conn, user string) (state
 	err := conn.QueryRowContext(ctx, `
 		SELECT plugin, HEX(authentication_string),
 		       HEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(User_attributes, '$.additional_password')), '')),
-		       UNIX_TIMESTAMP(NOW(6))
+		       UNIX_TIMESTAMP()
 		  FROM mysql.user WHERE User = ? AND Host = ?`, user, host).Scan(
 		&plugin, &primaryHex, &secondaryHex, &serverUnix)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -299,8 +303,11 @@ func (s *Store) inspect(ctx context.Context, conn *sql.Conn, user string) (state
 	if err != nil {
 		return state{}, s.wrap(err)
 	}
+	// UNIX_TIMESTAMP() without an argument is the server's epoch time,
+	// independent of the session time zone (NOW() would be ambiguous in
+	// the repeated hour of a DST change).
 	now := s.now()
-	if err := store.CheckClock(s.sched, now, time.Unix(0, int64(serverUnix*1e9))); err != nil {
+	if err := store.CheckClock(s.sched, now, time.Unix(int64(serverUnix), 0)); err != nil {
 		return state{}, err
 	}
 
@@ -341,6 +348,22 @@ func (s *Store) inspect(ctx context.Context, conn *sql.Conn, user string) (state
 		} else if reason != "" {
 			return state{}, store.Refused("%s", reason)
 		}
+	}
+	// The managed role is only a marker. If it carried privileges, every
+	// managed account would hold them; refuse any object-level grant on it
+	// (global and dynamic privileges were checked above).
+	var roleGrants int
+	r, rh := s.cfg.ManagedRole, s.cfg.ManagedRoleHost
+	if err := conn.QueryRowContext(ctx, `
+		SELECT (SELECT COUNT(*) FROM mysql.db WHERE User = ? AND Host = ?)
+		     + (SELECT COUNT(*) FROM mysql.tables_priv WHERE User = ? AND Host = ?)
+		     + (SELECT COUNT(*) FROM mysql.columns_priv WHERE User = ? AND Host = ?)
+		     + (SELECT COUNT(*) FROM mysql.procs_priv WHERE User = ? AND Host = ?)`,
+		r, rh, r, rh, r, rh, r, rh).Scan(&roleGrants); err != nil {
+		return state{}, s.wrap(err)
+	}
+	if roleGrants > 0 {
+		return state{}, store.Refused("managed role holds privileges (it must be an empty marker)")
 	}
 	var roleRoles int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM mysql.role_edges WHERE TO_USER = ? AND TO_HOST = ?`,
@@ -451,10 +474,16 @@ func (s *Store) privileged(ctx context.Context, conn *sql.Conn, user, host strin
 		return reason, nil
 	}
 
+	// mysql.db.Db is a LIKE pattern (GRANT ... ON %.* or m_sql.* match
+	// the mysql schema), so the system schema names are tested against
+	// the pattern, not the other way round. The other tables hold exact
+	// names.
 	var dynamic, schemaGrants, proxies int
 	if err := conn.QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM mysql.global_grants WHERE USER = ? AND HOST = ?),
-		       (SELECT COUNT(*) FROM mysql.db           WHERE User = ? AND Host = ? AND Db IN ('mysql', 'sys', 'performance_schema'))
+		       (SELECT COUNT(*) FROM mysql.db WHERE User = ? AND Host = ? AND (
+		            'mysql' LIKE Db ESCAPE '\\' OR 'sys' LIKE Db ESCAPE '\\' OR
+		            'performance_schema' LIKE Db ESCAPE '\\' OR 'information_schema' LIKE Db ESCAPE '\\'))
 		     + (SELECT COUNT(*) FROM mysql.tables_priv  WHERE User = ? AND Host = ? AND Db IN ('mysql', 'sys', 'performance_schema'))
 		     + (SELECT COUNT(*) FROM mysql.columns_priv WHERE User = ? AND Host = ? AND Db IN ('mysql', 'sys', 'performance_schema'))
 		     + (SELECT COUNT(*) FROM mysql.procs_priv   WHERE User = ? AND Host = ? AND Db IN ('mysql', 'sys', 'performance_schema')),

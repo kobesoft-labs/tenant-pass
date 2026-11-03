@@ -38,6 +38,7 @@ func TestStaticValidation(t *testing.T) {
 		{{ID: "../a", Node: "pg1", Account: "t_a", Apps: []string{"x"}}},
 		{{ID: "a", Node: "PG 1", Account: "t_a", Apps: []string{"x"}}},
 		{{ID: "a", Node: "pg1", Account: "", Apps: []string{"x"}}},
+		{{ID: "a", Node: "pg1", Account: "t_x", Apps: []string{"x"}}, {ID: "b", Node: "pg1", Account: "t_x", Apps: []string{"x"}}},
 	}
 	for i, ts := range bad {
 		if _, err := NewStatic(ts); err == nil {

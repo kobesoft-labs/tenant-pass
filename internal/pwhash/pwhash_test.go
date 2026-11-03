@@ -79,12 +79,12 @@ func TestMySQLRoundTrip(t *testing.T) {
 // Expected value computed by scripts/derivation_vectors.py, which uses
 // Python's hashlib (an independent PBKDF2/HMAC implementation).
 func TestSCRAMVector(t *testing.T) {
-	salt, _ := hex.DecodeString("ad3ceaff85f2029e16b5cf5890e41162")
-	got, err := SCRAM("umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM", salt)
+	salt, _ := hex.DecodeString("abf9ab9a389f481fee4908dd172c9ccc")
+	got, err := SCRAM("lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE", salt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "SCRAM-SHA-256$4096:rTzq/4XyAp4Wtc9YkOQRYg==$dwzLPDwP/7CwnPhHw/zWb7+XLxlpfEhoPyPLHE7dO9M=:7ljzKIBLT3xRViFwPrWVsXfr5RljubwmeqecuseE4yU="
+	want := "SCRAM-SHA-256$4096:q/mrmjifSB/uSQjdFyyczA==$1vO+SFZOWRWMJtkvT14UZD23M4IOBqVfMP6JjpxyVnA=:LKeE/8nXPt7v7OoC/qRpjmb66Fd0fA5wclO1IK9ZOII="
 	if got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}
@@ -94,7 +94,7 @@ func TestSCRAMVector(t *testing.T) {
 }
 
 func TestRedisVector(t *testing.T) {
-	if got := Redis("tCGHXsj_Vw3vLJeWcto3NlgDT5WlxI3kq_yAAHsajeg"); got != "bd4475de5ef98729dc284dc27d1add155bb43ee7e74f34c45631e5fc3ffbb501" {
+	if got := Redis("10MHE6qMKh6XzzFzHwmXBvgWoezTwvsUYb91z3guUHc"); got != "181dc3a4def9e83202b8ec73eb06014c09a45f58e3637756857dd1a1b47b6278" {
 		t.Fatal(got)
 	}
 }

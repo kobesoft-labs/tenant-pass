@@ -41,6 +41,7 @@ import (
 	"github.com/kobesoft-labs/tenant-pass/internal/auth"
 	"github.com/kobesoft-labs/tenant-pass/internal/config"
 	"github.com/kobesoft-labs/tenant-pass/internal/directory"
+	"github.com/kobesoft-labs/tenant-pass/internal/netcfg"
 	"github.com/kobesoft-labs/tenant-pass/internal/ratelimit"
 	"github.com/kobesoft-labs/tenant-pass/internal/secret"
 	"github.com/kobesoft-labs/tenant-pass/internal/server"
@@ -208,6 +209,17 @@ func cmdCheckConfig(args []string) error {
 		return err
 	}
 	defer a.close()
+	// The same construction steps as serve, so that check-config cannot
+	// pass a configuration that serve then rejects.
+	if _, err := auth.New(toAuthApps(a.cfg.Apps)); err != nil {
+		return err
+	}
+	jctx, jcancel := context.WithTimeout(context.Background(), 15*time.Second)
+	_, _, _, err = buildJobs(jctx, a.cfg)
+	jcancel()
+	if err != nil {
+		return err
+	}
 	if *connect {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -255,7 +267,7 @@ func cmdServe(args []string) error {
 		Verifier: &pass.Verifier{
 			Keys:   a.cfg.GatewayKeys,
 			MaxTTL: time.Duration(f.Pass.MaxTTL),
-			Leeway: time.Duration(f.Pass.Leeway),
+			Leeway: f.Pass.VerifierLeeway(),
 		},
 		Directory:    a.dir,
 		Nodes:        a.nodes,
@@ -300,7 +312,7 @@ func cmdServe(args []string) error {
 	go func() {
 		logger.Info("listening", "addr", f.Listen, "version", version)
 		if hs.TLSConfig != nil {
-			errc <- hs.ListenAndServeTLS(f.TLS.CertFile, f.TLS.KeyFile)
+			errc <- hs.ListenAndServeTLS("", "") // certificate from TLSConfig
 		} else {
 			errc <- hs.ListenAndServe()
 		}
@@ -379,7 +391,7 @@ func buildJobs(ctx context.Context, cfg *config.Resolved) (*pass.JobVerifier, *p
 			Issuers: issuers,
 		}
 	}
-	v := &pass.JobVerifier{Keys: keys, MaxTTL: j.MaxTTL, Leeway: time.Duration(cfg.File.Pass.Leeway)}
+	v := &pass.JobVerifier{Keys: keys, MaxTTL: j.MaxTTL, Leeway: cfg.File.Pass.VerifierLeeway()}
 	return v, signer, policies, nil
 }
 
@@ -391,17 +403,17 @@ func toAuthApps(apps []config.ResolvedApp) []auth.App {
 	return out
 }
 
-// serverTLS builds the listener's TLS configuration.
+// serverTLS builds the listener's TLS configuration from checked files.
 func serverTLS(t config.ServerTLS) (*tls.Config, error) {
-	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	cert, err := netcfg.LoadKeyPair(t.CertFile, t.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("tls: %w", err)
+	}
+	tc := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	if t.ClientCAFile != "" {
-		pemBytes, err := os.ReadFile(t.ClientCAFile)
+		pool, err := netcfg.LoadCertPool(t.ClientCAFile)
 		if err != nil {
-			return nil, err
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, errors.New("tls.client_ca_file contains no certificates")
+			return nil, fmt.Errorf("tls.client_ca_file: %w", err)
 		}
 		tc.ClientCAs = pool
 		// Certificates are verified whenever presented; whether one is

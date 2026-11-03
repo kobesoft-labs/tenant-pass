@@ -118,6 +118,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/job-tickets", s.jobTickets)
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/readyz", s.readyz)
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusNotFound, codeNotFound)
+	})
 	return secureHeaders(mux)
 }
 
@@ -513,11 +516,21 @@ func (s *Server) jobTickets(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.IssueTimeout)
 	defer cancel()
-	// One ticket per pass (per replica).
-	if !s.ticketPasses.use(claims.ID, claims.Expiry, time.Now()) {
+	// One ticket per pass (per replica). Reserved now so that concurrent
+	// requests with the same pass cannot both succeed; released again if
+	// no ticket is issued, so a transient failure does not use up the
+	// pass.
+	releasePass, fresh := s.ticketPasses.reserve(app, claims.ID, claims.Expiry, time.Now())
+	if !fresh {
 		x.fail(http.StatusForbidden, codeDenied, "pass_already_used")
 		return
 	}
+	issued := false
+	defer func() {
+		if !issued {
+			releasePass()
+		}
+	}()
 	// Resolve now, so the ticket names the canonical tenant ID and is
 	// only issued for an enabled tenant this application may access.
 	t, ok := x.resolve(ctx, app, claims.Host, claims.Tenant)
@@ -531,6 +544,7 @@ func (s *Server) jobTickets(w http.ResponseWriter, r *http.Request) {
 		x.failErr(http.StatusServiceUnavailable, codeUnavailable, "sign_error", err)
 		return
 	}
+	issued = true
 	exp := now.Add(ttl).UTC().Truncate(time.Second).Format(time.RFC3339)
 	x.a.add("expires_at", exp)
 	x.result, x.level = "ok", slog.LevelInfo

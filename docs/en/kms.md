@@ -83,7 +83,7 @@ Authenticate with any Vault auth method (Kubernetes, AppRole, cloud IAM) through
 | `mount` | Transit mount path, default `transit`. |
 | `tls` | `ca_file`, `server_name`, `cert_file`/`key_file` (client certificate auth). Verification is always on. |
 
-The client never follows redirects (which could send the token elsewhere) and does not use an HTTP proxy from the environment. Errors report the HTTP status only, never response bodies or the token.
+The client never follows redirects (which could send the token elsewhere) and does not use an HTTP proxy from the environment. Point `address` at the active node (or a load balancer that routes only to it): a standby that answers with a redirect is treated as an error. Errors report the HTTP status only, never response bodies or the token.
 
 The gateway uses the same `kms.vault` block and `signing_key.transit`.
 

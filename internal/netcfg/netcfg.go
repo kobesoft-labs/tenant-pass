@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 
 	"github.com/kobesoft-labs/tenant-pass/internal/secret"
@@ -92,6 +91,34 @@ func (e Endpoint) Resolve(allowPlaintext bool) (*Resolved, error) {
 	return r, nil
 }
 
+// LoadCertPool reads a PEM CA bundle with the integrity checks of
+// secret.ReadTrusted (whoever can write a CA file decides whom we trust).
+func LoadCertPool(path string) (*x509.CertPool, error) {
+	pem, err := secret.ReadTrusted(path)
+	if err != nil {
+		return nil, err
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s contains no certificates", path)
+	}
+	return pool, nil
+}
+
+// LoadKeyPair loads a certificate chain and its private key from the
+// exact bytes that passed the integrity checks (no second read).
+func LoadKeyPair(certFile, keyFile string) (tls.Certificate, error) {
+	certPEM, err := secret.ReadTrusted(certFile)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	key, err := secret.ReadFile(keyFile)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.X509KeyPair(certPEM, key.Bytes())
+}
+
 // Build returns a client TLS configuration that verifies the server
 // certificate chain and host name.
 func (t TLS) Build(defaultServerName string) (*tls.Config, error) {
@@ -103,13 +130,9 @@ func (t TLS) Build(defaultServerName string) (*tls.Config, error) {
 		cfg.ServerName = defaultServerName
 	}
 	if t.CAFile != "" {
-		pem, err := os.ReadFile(t.CAFile)
+		pool, err := LoadCertPool(t.CAFile)
 		if err != nil {
 			return nil, fmt.Errorf("tls ca_file: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("tls ca_file %s contains no certificates", t.CAFile)
 		}
 		cfg.RootCAs = pool
 	}
@@ -117,11 +140,7 @@ func (t TLS) Build(defaultServerName string) (*tls.Config, error) {
 		return nil, errors.New("tls cert_file and key_file must be set together")
 	}
 	if t.CertFile != "" {
-		// The key file is a secret: apply the same permission checks.
-		if _, err := secret.ReadFile(t.KeyFile); err != nil {
-			return nil, err
-		}
-		cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
+		cert, err := LoadKeyPair(t.CertFile, t.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("tls client certificate: %w", err)
 		}

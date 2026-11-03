@@ -30,7 +30,7 @@ services:
 ## Bootstrapping
 
 1. Provision the stores' admin accounts and marker roles ([PostgreSQL](stores/postgres.md), [MySQL](stores/mysql.md), [Redis](stores/redis.md)).
-2. `tenant-pass gen-rotation-key -out rotation-YYYY-MM` — distribute to tenant-pass replicas only.
+2. `tenant-pass gen-rotation-key -out rotation-YYYY-MM.key` — distribute to tenant-pass replicas only. (Keep the `.key` extension: `*.key` is ignored by git and by the Docker build context.)
 3. `tenant-pass gen-gateway-key …` — private key to the gateway, public key to tenant-pass.
 4. `tenant-pass gen-app-token` for each application — token to the application's secret store, hash into the config.
 5. `tenant-pass check-config -config config.json -connect`.
@@ -40,7 +40,7 @@ services:
 
 Keys carry `not_before`, so all replicas switch at the same window without coordination.
 
-1. `tenant-pass gen-rotation-key -out rotation-2026-12`.
+1. `tenant-pass gen-rotation-key -out rotation-2026-12.key`.
 2. Add it to every replica with `not_before` comfortably after the rollout finishes (for example tomorrow 03:00 UTC):
    ```json
    "keys": [
@@ -53,7 +53,7 @@ Keys carry `not_before`, so all replicas switch at the same window without coord
 
 Never change a key's `id` or secret in place: every replica must agree on which key a window uses. Adding a key whose `not_before` lies in the future is safe during a rolling update, because no replica uses it before then; make sure the rollout finishes before `not_before`.
 
-**Emergency (key exposed):** add a new key with `not_before` = now + rollout time, roll out, then remove the old key. Passwords derived from the old key stop working when their windows end (PostgreSQL), or when the next issuance or sweep replaces them (MySQL, Redis). For an immediate cut-off on PostgreSQL, `ALTER ROLE … VALID UNTIL 'now'` on affected roles (clients will refetch).
+**Emergency (key exposed):** add a new key with `not_before` = now + rollout time and roll out. Remove the old key only after the new key's `not_before` is **at least one window in the past** (startup requires the earliest configured key to be in force for a whole window). Passwords derived from the old key stop working when their windows end (PostgreSQL), or when the next issuance or sweep replaces them (MySQL, Redis). For an immediate cut-off on PostgreSQL, `ALTER ROLE … VALID UNTIL 'now'` on affected roles (clients will refetch). Also end existing sessions (see below): expiry does not close open connections.
 
 ## Changing the window
 
@@ -82,7 +82,7 @@ All events are JSON lines on stdout. Useful alerts:
 
 | Suspected compromise | Action |
 | --- | --- |
-| Application | Remove its `apps` entry (or replace its token hash) and roll out: it can no longer obtain credentials. Credentials it already holds expire within one window (MySQL/Redis: plus one sweep). Review `msg=credential` for that `app` to see which tenants it accessed. |
+| Application | Remove its `apps` entry (or replace its token hash) and roll out: it can no longer obtain credentials. Credentials it already holds stay usable for new connections for up to one window plus `renew_before` (MySQL/Redis: plus one sweep). **Open connections are not closed by expiry**: end them for the affected accounts (PostgreSQL `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 't_acme'`, MySQL `KILL <id>` from `SHOW PROCESSLIST`, Redis `CLIENT KILL USER t_acme` on every server). Review `msg=credential` for that `app` to see which tenants it accessed. |
 | Gateway key | Remove the key from `gateway_keys`, roll out, deploy a new key to the gateway. |
 | Job issuer (scheduler) key | Remove it from `job_tickets.trusted_issuers` and roll out; tickets it signed stop working immediately. |
 | tenant-pass's own job key | Replace `job_tickets.signing_key` (new `id`) and roll out; outstanding tickets stop working, jobs must obtain new ones. |
@@ -90,6 +90,18 @@ All events are JSON lines on stdout. Useful alerts:
 | Rotation key | See "Emergency" above. Also review store logs for logins from unexpected addresses. |
 | tenant-pass host | Treat all tenants as exposed: rotate rotation keys, store admin passwords, the TLS key; review store logs. |
 | Store admin password | Change it in the store and in the secret file; restart replicas. |
+
+## Verifying releases
+
+Release images are built by `.github/workflows/release.yml`, pushed with an SBOM and SLSA provenance, and signed with Sigstore (keyless). Verify before deploying:
+
+```sh
+cosign verify ghcr.io/kobesoft-labs/tenant-pass:<version> \
+  --certificate-identity-regexp '^https://github.com/kobesoft-labs/tenant-pass/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Deploy by digest (`ghcr.io/…@sha256:…`), not by tag.
 
 ## Upgrades
 

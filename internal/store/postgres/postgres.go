@@ -49,6 +49,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -85,11 +86,55 @@ type Config struct {
 
 // Store implements store.Store for PostgreSQL.
 type Store struct {
-	cfg   Config
-	sched *rotation.Schedule
-	pool  *pgxpool.Pool
-	locks keyedmutex.Map
-	now   func() time.Time
+	cfg      Config
+	sched    *rotation.Schedule
+	pool     *pgxpool.Pool
+	locks    keyedmutex.Map
+	now      func() time.Time
+	isolated atomic.Bool // checkIsolation succeeded once
+}
+
+// MinServerVersion is the oldest supported PostgreSQL (16). Before 16, a
+// role may grant membership in itself to others, so a tenant could make
+// another tenant's role fail the membership checks below, and CREATEROLE
+// reaches every non-superuser role.
+const MinServerVersion = 160000
+
+// checkIsolation verifies, once per process, the properties the locking
+// relies on. Advisory locks are scoped to one database; if tenants can
+// connect to the database tenant-pass uses, any tenant could take
+// pg_advisory_lock on another tenant's key and block its rotation until
+// its password expires. So the admin connection must use a database that
+// neither PUBLIC nor any managed role may connect to.
+func (s *Store) checkIsolation(ctx context.Context) error {
+	if s.isolated.Load() {
+		return nil
+	}
+	var version int
+	var publicConnect, tenantConnect bool
+	var db string
+	err := s.pool.QueryRow(ctx, `
+		SELECT current_setting('server_version_num')::int,
+		       current_database(),
+		       has_database_privilege('public', current_database(), 'CONNECT'),
+		       EXISTS (SELECT 1 FROM pg_roles r
+		                WHERE r.rolname <> current_user
+		                  AND NOT r.rolsuper
+		                  AND pg_has_role(r.oid, $1::text, 'MEMBER')
+		                  AND has_database_privilege(r.oid, current_database(), 'CONNECT'))`,
+		s.cfg.ManagedGroup).Scan(&version, &db, &publicConnect, &tenantConnect)
+	if err != nil {
+		return err
+	}
+	switch {
+	case version < MinServerVersion:
+		return fmt.Errorf("postgres %s: PostgreSQL 16 or later is required (server_version_num %d)", s.cfg.Name, version)
+	case publicConnect || tenantConnect:
+		return fmt.Errorf("postgres %s: database %q is connectable by PUBLIC or by managed roles; "+
+			"use a dedicated database for tenant-pass (REVOKE CONNECT ON DATABASE ... FROM PUBLIC)", s.cfg.Name, db)
+	}
+	s.isolated.Store(true)
+	return nil
 }
 
 // New connects to the node. It does not verify connectivity; call Ping.
@@ -224,6 +269,9 @@ func (s *Store) Issue(ctx context.Context, role string, repair bool) (store.Cred
 	if !s.cfg.AccountPattern.MatchString(role) {
 		return store.Credential{}, store.Refused("role name does not match account_pattern")
 	}
+	if err := s.checkIsolation(ctx); err != nil {
+		return store.Credential{}, err
+	}
 	unlock, err := s.locks.Lock(ctx, role)
 	if err != nil {
 		return store.Credential{}, err
@@ -305,7 +353,9 @@ func (s *Store) Issue(ctx context.Context, role string, repair bool) (store.Cred
 				COALESCE(bool_or(r.rolname LIKE 'pg\_%'), false),
 				COALESCE(bool_or(r.rolcanlogin), false),
 				EXISTS (SELECT 1 FROM pg_auth_members m
-				         WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = $1::text) AND m.admin_option)
+				         WHERE m.admin_option AND (
+				               m.member = (SELECT oid FROM pg_roles WHERE rolname = $1::text)
+				            OR m.member IN (SELECT oid FROM anc)))
 			FROM anc JOIN pg_roles r ON r.oid = anc.oid`, role).Scan(&ancAdmin, &ancPredefined, &ancLogin, &hasAdminOption)
 		if err != nil {
 			return err
@@ -318,7 +368,7 @@ func (s *Store) Issue(ctx context.Context, role string, repair bool) (store.Cred
 		case ancLogin:
 			return store.Refused("role is a member of a login role")
 		case hasAdminOption:
-			return store.Refused("role holds ADMIN OPTION on another role")
+			return store.Refused("role (or a role it is a member of) holds ADMIN OPTION on another role")
 		}
 		_ = infinite // infinity is handled as NULL: unmanaged, overwrite
 

@@ -17,7 +17,7 @@ ALTER ROLE "t_acme" PASSWORD 'SCRAM-SHA-256$4096:…' VALID UNTIL '2026-11-03 12
 
 ## Supported versions
 
-PostgreSQL 13 and later. **PostgreSQL 16 or later is strongly recommended**, because PostgreSQL 16 changed `CREATEROLE` so that it only applies to roles the admin has `ADMIN OPTION` on. On 13–15, a `CREATEROLE` role can change the password of **any** non-superuser role, and only tenant-pass's own safety checks stand between a wrong directory entry and, for example, your application's owner role.
+PostgreSQL **16 or later** (enforced at runtime). PostgreSQL 16 changed `CREATEROLE` so that it only applies to roles the admin has `ADMIN OPTION` on. Before 16, a `CREATEROLE` role can change the password of any non-superuser role, and a role may grant membership in itself to others, so one tenant could make another tenant's role fail tenant-pass's membership checks.
 
 `password_encryption` must be `scram-sha-256` (the default since 14) and `pg_hba.conf` must use `scram-sha-256` for tenant roles.
 
@@ -26,8 +26,17 @@ PostgreSQL 13 and later. **PostgreSQL 16 or later is strongly recommended**, bec
 Run as a superuser (or your provisioning role):
 
 ```sql
+-- tenant-pass's own database. tenant-pass serializes work on each role
+-- with advisory locks, which are scoped to one database: if tenants could
+-- connect to it, any tenant could hold another tenant's lock and block its
+-- rotation. tenant-pass refuses to work in a database that PUBLIC or any
+-- managed role may connect to.
+CREATE DATABASE tenant_pass;
+REVOKE ALL ON DATABASE tenant_pass FROM PUBLIC;
+
 -- The account tenant-pass logs in as.
 CREATE ROLE tenant_pass_admin LOGIN CREATEROLE PASSWORD '<random>';
+GRANT CONNECT ON DATABASE tenant_pass TO tenant_pass_admin;
 
 -- Marker: tenant-pass only touches members of this role.
 CREATE ROLE tenant_pass_managed NOLOGIN;
@@ -46,7 +55,7 @@ GRANT t_acme TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
 Notes:
 
 - If `tenant_pass_admin` itself creates the tenant roles, PostgreSQL 16+ grants it `ADMIN OPTION` automatically (with `INHERIT`/`SET` depending on `createrole_self_grant`; keep that setting empty).
-- `INHERIT FALSE, SET FALSE` means `tenant_pass_admin` cannot use the tenant's privileges or `SET ROLE` to it. It can only manage the role.
+- `INHERIT FALSE, SET FALSE` keeps `tenant_pass_admin` from using the tenant's privileges **by default**. It is not a hard boundary: holding `ADMIN OPTION`, the admin could re-grant the role to itself with `SET TRUE`. tenant-pass never does this, but whoever controls the `tenant_pass_admin` login can. Protect that account accordingly.
 - Do not give tenant roles `SUPERUSER`, `CREATEROLE`, `CREATEDB`, `REPLICATION` or `BYPASSRLS`; tenant-pass refuses such roles anyway.
 - Connect tenant-pass directly to PostgreSQL, not through a transaction pooler.
 
@@ -61,10 +70,10 @@ Under the advisory lock, before any change, tenant-pass reads `pg_roles` / `pg_a
 - it is a member of `managed_group` (`pg_has_role(role, group, 'MEMBER')`);
 - it has none of `SUPERUSER`, `CREATEROLE`, `CREATEDB`, `REPLICATION`, `BYPASSRLS`;
 - no role it is a member of, directly or indirectly, has any of those attributes, is a predefined `pg_*` role (`pg_read_all_data`, `pg_write_server_files`, `pg_execute_server_program`, …), or can log in;
-- it holds `ADMIN OPTION` on no role;
+- neither it nor any role it is a member of holds `ADMIN OPTION` on any role;
 - it is neither `managed_group` itself nor tenant-pass's own login role.
 
-It also compares its clock with the server's `clock_timestamp()` and refuses to write when they differ by more than `rotation.max_clock_skew`.
+It also compares its clock with the server's `clock_timestamp()` and refuses to write when they differ by more than `rotation.max_clock_skew`, and it refuses to work at all unless the server is PostgreSQL 16+ and the admin connection's database cannot be connected to by PUBLIC or by any managed role.
 
 Grant tenant roles privileges on their own objects (or through NOLOGIN group roles without special attributes); anything broader is refused.
 
@@ -78,7 +87,7 @@ Grant tenant roles privileges on their own objects (or through NOLOGIN group rol
     "address": "pg1.internal:5432",
     "user": "tenant_pass_admin",
     "password_file": "/run/secrets/pg1-admin-password",
-    "database": "postgres",
+    "database": "tenant_pass",
     "tls": {"ca_file": "/etc/tenant-pass/db-ca.pem"}
   },
   "managed_group": "tenant_pass_managed",

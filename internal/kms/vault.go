@@ -234,7 +234,7 @@ func (v *Vault) NewTransitSigner(ctx context.Context, name string, version int) 
 		return nil, fmt.Errorf("kms: transit key %s has no version %d", name, version)
 	}
 	pub, err := base64.StdEncoding.DecodeString(k.PublicKey)
-	if err != nil || len(pub) != ed25519.PublicKeySize {
+	if err != nil || len(pub) != ed25519.PublicKeySize || CheckEd25519PublicKey(pub) != nil {
 		return nil, errors.New("kms: invalid public key from vault")
 	}
 	return &TransitSigner{v: v, key: name, version: version, pub: pub}, nil

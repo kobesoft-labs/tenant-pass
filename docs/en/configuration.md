@@ -57,7 +57,7 @@ Several keys may be configured at once (several gateways, or rotation).
 | Key | Default | Range | Description |
 | --- | --- | --- | --- |
 | `max_ttl` | `"60s"` | 1s–5m | Maximum `exp − iat` of a pass. |
-| `leeway` | `"5s"` | 0–30s | Tolerated clock difference for `iat`. Never applied to `exp`. |
+| `leeway` | `"5s"` | 0–30s | Tolerated clock difference for `iat`. Never applied to `exp`. An explicit `"0s"` means no leeway. |
 
 ## `apps[]`
 

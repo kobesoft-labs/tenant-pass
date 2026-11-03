@@ -148,11 +148,15 @@ func (a *Authenticator) Authenticate(r *http.Request) (string, error) {
 			return "", ErrUnauthenticated
 		}
 	} else {
-		// Certificate-only applications.
+		// Certificate-only applications. A certificate whose URI SANs
+		// name more than one application is ambiguous and refused,
+		// rather than silently becoming whichever is configured first.
 		for i := range a.apps {
 			if a.apps[i].TokenSHA256 == nil && containsString(uris, a.apps[i].ClientCertURI) {
+				if match != nil {
+					return "", ErrUnauthenticated
+				}
 				match = &a.apps[i]
-				break
 			}
 		}
 		if match == nil {

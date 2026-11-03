@@ -62,7 +62,7 @@ A pass is a [PASETO v4.public](https://github.com/paseto-standard/paseto-spec) t
 tenant-pass runs as several identical replicas with no shared state. Two replicas asked for the same account at the same time must return the same password. Instead of coordinating, every replica derives the password from the same inputs:
 
 ```
-password(n) = base64url(HMAC-SHA256(K, "tenant-pass/v1/password" || LP(store) || LP(node) || LP(account) || LP(key ID) || BE64(n)))
+password(n) = base64url(HMAC-SHA256(K, "tenant-pass/v1/password" || LP(store) || LP(node) || LP(account) || LP(key ID) || BE64(W) || BE64(n)))
 ```
 
 - `n` is the **window** number. Windows are `rotation.window` long (default 15 min). Each account's windows are shifted by an offset derived from a hash of (store, node, account), so accounts do not all rotate at the same moment.
@@ -120,7 +120,9 @@ tenant-pass resets passwords. Pointed at the wrong account, that is dangerous. S
 
 A refused account yields `403 denied` to the client and an `account_refused` error in the audit log, which should be alerted on.
 
-The checks are deliberately strict: a tenant account should hold privileges on its own database, schema, tables or key prefix only. Anything broader is refused rather than evaluated.
+The checks are deliberately strict about **administrative and server-wide** privileges: anything that reaches beyond one account's own objects at the server level (superuser-like attributes, predefined roles, global grants, wildcard database grants, unrestricted key patterns) is refused rather than evaluated.
+
+What the checks cannot see in general is a grant on **another tenant's** objects (for example `GRANT SELECT ON acme.invoices TO t_beta`, or a NOLOGIN group that owns shared tables). Keeping each tenant's privileges to its own database, schema, tables or key prefix is the job of your provisioning, and tenant-pass relies on it.
 
 ## Statelessness and replicas
 

@@ -8,11 +8,14 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,7 +93,8 @@ func setup(t *testing.T, mutate func(*File)) *fixture {
 		Identity: IdentitySettings{
 			Issuer: issuer, Audiences: []string{"tenant-apps"}, JWKSFile: jwksPath,
 			Algorithms: []string{"RS256", "ES256", "EdDSA"}, AuthorizationHeader: true, Cookie: "session",
-			TenantClaim: "tenant_id", Leeway: config.Duration(30 * time.Second),
+			TenantClaim: "tenant_id", Leeway: ptr(config.Duration(30 * time.Second)),
+			CookieFetchMetadata: "enforce",
 		},
 		Routes: []Route{
 			{Host: "{tenant}.billing.example.com", App: "billing"},
@@ -158,8 +162,8 @@ func TestPassForOwnTenant(t *testing.T) {
 			t.Error("missing no-store")
 		}
 	}
-	// Cookie source works too.
-	if w := fx.call("acme.billing.example.com", "", fx.idp.userToken(t, "acme")); w.Header().Get("Tenant-Pass") == "" {
+	// Cookie source works too (for a same-origin request).
+	if w := fx.call("acme.billing.example.com", "", fx.idp.userToken(t, "acme"), sameOrigin); w.Header().Get("Tenant-Pass") == "" {
 		t.Fatal("cookie token not accepted")
 	}
 }
@@ -369,6 +373,10 @@ func TestCallerAuthRequiredOffLoopback(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	f.TLS.ClientCAFile = "ca.pem"
+	if _, err := f.validate(); err == nil {
+		t.Fatal("client CA without pinned caller names accepted")
+	}
+	f.TLS.ClientURIs = []string{"spiffe://example.org/proxy"}
 	if _, err := f.validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -376,6 +384,78 @@ func TestCallerAuthRequiredOffLoopback(t *testing.T) {
 	bad.Identity.ForwardClaims = map[string]string{"Cookie": "sub"}
 	if _, err := bad.validate(); err == nil {
 		t.Fatal("forwarding into Cookie accepted")
+	}
+}
+
+func sameOrigin(r *http.Request) { r.Header.Set("Sec-Fetch-Site", "same-origin") }
+
+func TestCookieFetchMetadata(t *testing.T) {
+	fx := setup(t, nil)
+	tok := fx.idp.userToken(t, "acme")
+	h := func(site, mode, user string) func(*http.Request) {
+		return func(r *http.Request) {
+			if site != "" {
+				r.Header.Set("Sec-Fetch-Site", site)
+			}
+			if mode != "" {
+				r.Header.Set("Sec-Fetch-Mode", mode)
+			}
+			if user != "" {
+				r.Header.Set("Sec-Fetch-User", user)
+			}
+		}
+	}
+	cases := []struct {
+		name string
+		mut  func(*http.Request)
+		pass bool
+	}{
+		{"same-origin subresource", h("same-origin", "no-cors", ""), true},
+		{"typed URL", h("none", "navigate", "?1"), true},
+		{"user click from sibling host", h("same-site", "navigate", "?1"), true},
+		{"image from sibling host", h("same-site", "no-cors", ""), false},
+		{"script-driven navigation", h("same-site", "navigate", ""), false},
+		{"cross-site fetch", h("cross-site", "cors", ""), false},
+		{"no fetch metadata", h("", "", ""), false},
+	}
+	for _, c := range cases {
+		w := fx.call("acme.billing.example.com", "", tok, c.mut)
+		if got := w.Header().Get("Tenant-Pass") != ""; got != c.pass {
+			t.Errorf("%s: pass=%v", c.name, got)
+		}
+	}
+	// Bearer tokens are not sent automatically by browsers: no check.
+	if w := fx.call("acme.billing.example.com", tok, ""); w.Header().Get("Tenant-Pass") == "" {
+		t.Error("bearer token refused")
+	}
+	// "off" disables the check.
+	fx = setup(t, func(f *File) { f.Identity.CookieFetchMetadata = "off" })
+	if w := fx.call("acme.billing.example.com", "", fx.idp.userToken(t, "acme")); w.Header().Get("Tenant-Pass") == "" {
+		t.Error("cookie_fetch_metadata=off still enforced")
+	}
+}
+
+func TestDuplicateCookiesRefused(t *testing.T) {
+	fx := setup(t, nil)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-Forwarded-Host", "acme.billing.example.com")
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	r.Header.Add("Cookie", "session="+fx.idp.userToken(t, "evil")+"; session="+fx.idp.userToken(t, "acme"))
+	w := httptest.NewRecorder()
+	fx.h.ServeHTTP(w, r)
+	if w.Header().Get("Tenant-Pass") != "" {
+		t.Fatal("pass issued with ambiguous session cookies")
+	}
+}
+
+func TestNoHealthPathOnAuthListener(t *testing.T) {
+	fx := setup(t, func(f *File) { f.Unauthenticated = "deny" })
+	r := httptest.NewRequest(http.MethodGet, "/healthz?x=1", nil)
+	r.Header.Set("X-Forwarded-Host", "acme.billing.example.com")
+	w := httptest.NewRecorder()
+	fx.h.ServeHTTP(w, r)
+	if w.Code != 401 {
+		t.Fatalf("/healthz bypassed deny: %d", w.Code)
 	}
 }
 
@@ -482,5 +562,28 @@ func TestExampleConfigParses(t *testing.T) {
 	}
 	if _, err := f.validate(); err != nil && !strings.Contains(err.Error(), "caller_secret_file") {
 		t.Fatal(err)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func TestCallerCertCheck(t *testing.T) {
+	u, _ := url.Parse("spiffe://example.org/proxy")
+	other, _ := url.Parse("spiffe://example.org/app")
+	check := CallerCertCheck([]string{"spiffe://example.org/proxy"}, []string{"proxy.internal"})
+	st := func(c *x509.Certificate) tls.ConnectionState {
+		return tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{c}}}
+	}
+	if err := check(st(&x509.Certificate{URIs: []*url.URL{u}})); err != nil {
+		t.Error(err)
+	}
+	if err := check(st(&x509.Certificate{DNSNames: []string{"proxy.internal"}})); err != nil {
+		t.Error(err)
+	}
+	if err := check(st(&x509.Certificate{URIs: []*url.URL{other}, DNSNames: []string{"app.internal"}})); err == nil {
+		t.Error("application certificate accepted as caller")
+	}
+	if err := check(tls.ConnectionState{}); err == nil {
+		t.Error("no certificate accepted")
 	}
 }

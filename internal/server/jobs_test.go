@@ -123,16 +123,47 @@ func TestOneTicketPerPass(t *testing.T) {
 func TestPassReplayBounded(t *testing.T) {
 	var r passReplay
 	now := time.Now()
-	for i := range maxSeenPasses {
-		if !r.use(strconv.Itoa(i), now.Add(time.Minute), now) {
-			t.Fatal("refused before full")
+	for i := range maxSeenPassesPerApp {
+		if _, ok := r.reserve("a", strconv.Itoa(i), now.Add(time.Minute), now); !ok {
+			t.Fatal("refused before quota")
 		}
 	}
-	if r.use("new", now.Add(time.Minute), now) {
-		t.Fatal("accepted when full of live entries (must fail closed)")
+	if _, ok := r.reserve("a", "new", now.Add(time.Minute), now); ok {
+		t.Fatal("over per-app quota accepted (must fail closed)")
 	}
-	if !r.use("new", now.Add(3*time.Minute), now.Add(2*time.Minute)) {
-		t.Fatal("expired entries not evicted")
+	// Another application is not affected by a's quota.
+	if _, ok := r.reserve("b", "x", now.Add(time.Minute), now); !ok {
+		t.Fatal("other app crowded out")
+	}
+	// Expired entries are pruned.
+	if _, ok := r.reserve("a", "new", now.Add(3*time.Minute), now.Add(2*time.Minute)); !ok {
+		t.Fatal("expired entries not pruned")
+	}
+	// Release makes a pass reusable; the same jti for another app is distinct.
+	rel, ok := r.reserve("c", "j", now.Add(time.Minute), now)
+	if !ok {
+		t.Fatal("reserve")
+	}
+	if _, ok := r.reserve("c", "j", now.Add(time.Minute), now); ok {
+		t.Fatal("double reserve")
+	}
+	rel()
+	if _, ok := r.reserve("c", "j", now.Add(time.Minute), now); !ok {
+		t.Fatal("not reusable after release")
+	}
+}
+
+func TestTicketPassReleasedOnFailure(t *testing.T) {
+	e, _ := jobEnv(t)
+	// A disabled tenant fails after the pass has been reserved.
+	p := e.pass(t, "billing", "off.example.com")
+	for range 2 {
+		if code, out := e.post(t, "/v1/job-tickets", "tpa_billing", `{"pass":"`+p+`"}`); code != 403 || out["error"] != codeDenied {
+			t.Fatalf("%d %v", code, out)
+		}
+	}
+	if strings.Count(e.logs.String(), "pass_already_used") != 0 {
+		t.Fatal("failed issuance consumed the pass")
 	}
 }
 

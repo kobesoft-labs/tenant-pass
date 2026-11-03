@@ -32,8 +32,8 @@ End(n)   = Start(n + 1)
 選択された鍵のシークレットを `K`、その ID を `id` とすると、次のようになります。
 
 ```
-password(n) = base64url_nopad( HMAC-SHA256(K, "tenant-pass/v1/password" || A || LP(id) || BE64(n)) )   → 43 chars
-salt(n)     =                  HMAC-SHA256(K, "tenant-pass/v1/salt"     || A || LP(id) || BE64(n))     → 32 bytes
+password(n) = base64url_nopad( HMAC-SHA256(K, "tenant-pass/v1/password" || A || LP(id) || BE64(W) || BE64(n)) )   → 43 chars
+salt(n)     =                  HMAC-SHA256(K, "tenant-pass/v1/salt"     || A || LP(id) || BE64(W) || BE64(n))     → 32 bytes
 ```
 
 ソルトは、クライアント側でパスワードをハッシュするストアで使われます。
@@ -56,23 +56,23 @@ refresh_at(n) = End(n) − renew_before
 
 | store / node / account | offset | n | Start | password(n) |
 | --- | --- | --- | --- | --- |
-| postgres / pg1 / t_acme | 539 | 1993007 | 1793706839 | `umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM` |
-| mysql / my1 / t_acme | 601 | 1993007 | 1793706901 | `lRJgB4tM38aEGO4myi2zfoNWJK1vHuH-yu08BLhnjoU` |
-| redis / rd1 / t_acme | 86 | 1993007 | 1793706386 | `tCGHXsj_Vw3vLJeWcto3NlgDT5WlxI3kq_yAAHsajeg` |
+| postgres / pg1 / t_acme | 539 | 1993007 | 1793706839 | `lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE` |
+| mysql / my1 / t_acme | 601 | 1993007 | 1793706901 | `e1J8ptbuAhJdMRKoN64HY-aPS_M_8qT5JBYJPCuixDg` |
+| redis / rd1 / t_acme | 86 | 1993007 | 1793706386 | `10MHE6qMKh6XzzFzHwmXBvgWoezTwvsUYb91z3guUHc` |
 
 ソルト（16 進）:
 
-- postgres: `ad3ceaff85f2029e16b5cf5890e411627895fe6d5367e8fc9818f4cd3b8ac398`
-- mysql: `fa0dfbe05a2c07ae34e8eeec3d7a69aeaa9b60ab100db11c12d05615995b40f6`
-- redis: `c493c646278a7ec0e7d27fe9acc557c08f7e8842fead295a7ef5a3107f9f0a84`
+- postgres: `abf9ab9a389f481fee4908dd172c9cccbadfec535752012f6409fd656d729d1a`
+- mysql: `b810862d689e69fa9b9e7505734ead2377cc468d2c81eeb6f48c7fc2556b8034`
+- redis: `51ffc4190e3dc0774a7711bf75a433650b3d7d0235b8c879ec569274e11ff1b5`
 
 postgres の行に対応する PostgreSQL の SCRAM ベリファイア:
 
 ```
-SCRAM-SHA-256$4096:rTzq/4XyAp4Wtc9YkOQRYg==$dwzLPDwP/7CwnPhHw/zWb7+XLxlpfEhoPyPLHE7dO9M=:7ljzKIBLT3xRViFwPrWVsXfr5RljubwmeqecuseE4yU=
+SCRAM-SHA-256$4096:q/mrmjifSB/uSQjdFyyczA==$1vO+SFZOWRWMJtkvT14UZD23M4IOBqVfMP6JjpxyVnA=:LKeE/8nXPt7v7OoC/qRpjmb66Fd0fA5wclO1IK9ZOII=
 ```
 
-redis の行に対応する Redis の ACL ハッシュ: `bd4475de5ef98729dc284dc27d1add155bb43ee7e74f34c45631e5fc3ffbb501`。
+redis の行に対応する Redis の ACL ハッシュ: `181dc3a4def9e83202b8ec73eb06014c09a45f58e3637756857dd1a1b47b6278`。
 
 MySQL の SHA-crypt 実装は、OpenSSL（`openssl passwd -5`）および実際の MySQL 8.4 サーバーが生成したハッシュに対してテストされています（`internal/pwhash/pwhash_test.go`）。
 
@@ -82,4 +82,5 @@ MySQL の SHA-crypt 実装は、OpenSSL（`openssl passwd -5`）および実際�
 - 異なるラベル（`password`、`salt`、`offset`）によって、鍵とハッシュの用途が分離されます。
 - ストアの種類が入力に含まれるため、PostgreSQL ノードと Redis ノードにある同名のアカウントには、同じ鍵の下でも無関係なパスワードが割り当てられます。
 - 鍵 ID が入力に含まれるため、鍵の名前を変えると、その鍵から導出されるすべてのパスワードが変わります。
+- ウィンドウの長さ `W` も入力に含まれるため、`rotation.window` を変えても、新しいウィンドウが過去のウィンドウの番号（つまりそのパスワード）を再利用することはありません。
 - `K` を持つ者は誰でも、そこから導出される任意のパスワードを計算できます。ローテーション鍵はそれに見合った方法で保護し、漏洩が疑われる場合はローテーションしてください。

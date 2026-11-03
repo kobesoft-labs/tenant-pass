@@ -1,8 +1,14 @@
 /.e2e-bin/
 /tenant-pass
+/tenant-pass-gateway
 *.test
 *.out
-# Never commit keys or secrets.
+# Never commit keys, tokens or secrets.
 *.key
 *.pem
 !examples/**/*.pem
+*.token
+.env
+.env.*
+rotation-*
+!docs/**

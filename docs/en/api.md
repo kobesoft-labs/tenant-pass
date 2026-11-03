@@ -42,7 +42,7 @@ Content-Type: application/json
   "port": 6432,
   "database": "app",
   "username": "t_acme",
-  "password": "umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM",
+  "password": "lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE",
   "expires_at": "2026-11-03T12:13:59Z",
   "refresh_at": "2026-11-03T12:08:59Z"
 }
@@ -134,7 +134,7 @@ tenant-pass writes one JSON line per request to standard output: `"msg":"credent
 | `issuer` | For tickets: the key ID that signed it. |
 | `result` | `ok` or the error code returned to the client. |
 | `reason` | Why it failed: `app_auth`, `body_size`, `body_json`, `content_type`, `pass_malformed`, `pass_unknown_key`, `pass_signature`, `pass_claims`, `pass_expired`, `pass_audience`, `distinct_tenants`, `distinct_tenants_jobs`, `pass_or_ticket`, `jobs_not_enabled`, `job_issue_not_enabled`, `issuer_not_allowed`, `ticket_lifetime`, `pass_already_used`, `ticket_*` (as `pass_*`), `ttl`, `sign_error`, `tenant_not_found`, `tenant_disabled`, `directory_error`, `directory_mismatch`, `unknown_node`, `account_refused`, `clock_skew`, `timeout`, `store_error`, `max_concurrent_requests`. |
-| `error` | For `directory_error` / `store_error` / `account_refused`: the error class (SQLSTATE, MySQL error number, Redis error prefix, refusal reason). Server error messages are not copied. |
+| `error` | For `directory_error` / `store_error` / `account_refused` and similar: the error class (SQLSTATE, MySQL error number, Redis error prefix, refusal reason). Server error messages are not copied. Errors that do not come from the database server (network, TLS, timeouts) are logged with their text, which can include host names and the admin user name, but never passwords or keys. |
 | `changed` | Whether the store was modified. |
 | `window`, `key_id` | Which window and rotation key the credential belongs to. |
 

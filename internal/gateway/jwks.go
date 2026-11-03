@@ -8,11 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
+
+	"github.com/kobesoft-labs/tenant-pass/internal/secret"
 )
 
 // keySet holds the identity provider's verification keys.
@@ -40,7 +41,7 @@ const (
 )
 
 func newFileKeySet(path string) (*keySet, error) {
-	b, err := os.ReadFile(path)
+	b, err := secret.ReadTrusted(path)
 	if err != nil {
 		return nil, err
 	}

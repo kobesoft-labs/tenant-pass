@@ -49,14 +49,14 @@ ACL SETUSER t_acme on resetchannels &tenant-pass:managed &t:acme:* -@all +@read 
 
 - ユーザー名が `account_pattern` と `[A-Za-z0-9_.:-]{1,128}` に一致し、`default` ではない。
 - ユーザーが存在し（tenant-pass がユーザーを作成することはありません）、管理対象マーカーを持つ。
-- **`ACL DRYRUN`** により、ユーザーが次のいずれも実行できないことが報告される: `ACL …`、`CONFIG …`、`MODULE …`、`DEBUG`、`SHUTDOWN`、`FLUSHALL`、`FLUSHDB`、`SWAPDB`、`KEYS`、`CLIENT KILL/LIST/PAUSE`、`SCRIPT FLUSH`、`FUNCTION LOAD/DELETE/FLUSH`、`REPLICAOF`、`SLAVEOF`、`FAILOVER`、`CLUSTER …`、`SAVE`、`BGSAVE`、`BGREWRITEAOF`、`MONITOR`、`SYNC`、`PSYNC`、`SLOWLOG RESET`、`LATENCY RESET`、`MEMORY PURGE`。
-- **`ACL DRYRUN`** により、ユーザーがランダムなキーに対する `GET`/`SET` も、ランダムなチャネルに対する `PUBLISH`/`SUBSCRIBE` もできない（つまり、キーとチャネルのパターンが制限されている）ことが報告される。
+- **`ACL DRYRUN`** により、ユーザーが次のいずれも実行できないことが報告される: `ACL …`、`CONFIG …`、`MODULE …`、`DEBUG`、`SHUTDOWN`、`FLUSHALL`、`FLUSHDB`、`SWAPDB`、`KEYS`、`CLIENT KILL/LIST/PAUSE`、`SCRIPT FLUSH`、`FUNCTION LOAD/DELETE/FLUSH`、`REPLICAOF`、`SLAVEOF`、`FAILOVER`、`CLUSTER …`、`SAVE`、`BGSAVE`、`BGREWRITEAOF`、`MONITOR`、`SYNC`、`PSYNC`、`SLOWLOG RESET`、`LATENCY RESET`、`MEMORY PURGE`、およびキーパターンに関係なくすべてのキー名やチャネル名が見えるコマンド: `SCAN`、`RANDOMKEY`、`PUBSUB CHANNELS/SHARDCHANNELS`、`DBSIZE`、`OBJECT`。
+- **`ACL DRYRUN`** により、ユーザーがランダムなキーに対する `GET`/`SET` も、ランダムなチャネルに対する `PUBLISH`/`SUBSCRIBE` もできないことが報告される。`~[a-s]*` のような部分的なパターンも検出できるよう、さまざまな文字で始まる名前で検査します（つまり、キーとチャネルのパターンが自身のプレフィックスに制限されている）。
 - ルール文字列の静的チェックで、`allcommands`、`allkeys`、`+@all`、`+@admin`、`+@dangerous`、または上記コマンドの明示的な許可が見つからない。
 - サーバーの `TIME` が、`rotation.max_clock_skew` の範囲内でレプリカの時計と一致している。
 
 `ACL DRYRUN` は、カテゴリやセレクターを含めた、ユーザーの *実効* 権限を評価します。これは重要です。`@slow` などのカテゴリには `ACL` や `CONFIG` が含まれているからです。テナントには個別のコマンドか、狭いカテゴリ（`@read`、`@write`、`@string`、`@hash` など）を付与してください。
 
-スイーパーはパスワードを削除するだけなので、マーカーはチェックしますが、`DRYRUN` による検査は省略します。
+スイーパーはパスワードを削除するだけです。スイープは **サーバーごとに個別に** 行われ（あるサーバーにユーザーが存在しない、またはあるサーバーに到達できなくても、他のサーバーのスイープは止まりません）、マーカーを持たないユーザーや静的な権限チェックに失敗したユーザーには決して手を触れません。より負荷の高い `DRYRUN` による検査は省略します。
 
 ## ノードの設定
 

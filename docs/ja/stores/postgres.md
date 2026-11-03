@@ -17,7 +17,7 @@ ALTER ROLE "t_acme" PASSWORD 'SCRAM-SHA-256$4096:…' VALID UNTIL '2026-11-03 12
 
 ## 対応バージョン
 
-PostgreSQL 13 以降。**PostgreSQL 16 以降を強く推奨します。** PostgreSQL 16 で `CREATEROLE` の仕様が変わり、管理者が `ADMIN OPTION` を持つロールにのみ適用されるようになったためです。13〜15 では、`CREATEROLE` を持つロールは **任意の** 非スーパーユーザーロールのパスワードを変更できます。そのため、ディレクトリの誤ったエントリーと、たとえばアプリケーションのオーナーロールとの間に立ちはだかるのは、tenant-pass 自身の安全性チェックだけになります。
+PostgreSQL **16 以降**（実行時に強制されます）。PostgreSQL 16 で `CREATEROLE` の仕様が変わり、管理者が `ADMIN OPTION` を持つロールにのみ適用されるようになりました。16 より前では、`CREATEROLE` を持つロールは任意の非スーパーユーザーロールのパスワードを変更でき、またロールは自身へのメンバーシップを他のロールに付与できるため、あるテナントが別のテナントのロールを tenant-pass のメンバーシップチェックに失敗させることができてしまいます。
 
 `password_encryption` は `scram-sha-256`（14 以降のデフォルト）でなければならず、`pg_hba.conf` はテナントロールに対して `scram-sha-256` を使わなければなりません。
 
@@ -26,8 +26,17 @@ PostgreSQL 13 以降。**PostgreSQL 16 以降を強く推奨します。** Postg
 スーパーユーザー（またはプロビジョニング用のロール）で実行します。
 
 ```sql
+-- tenant-pass's own database. tenant-pass serializes work on each role
+-- with advisory locks, which are scoped to one database: if tenants could
+-- connect to it, any tenant could hold another tenant's lock and block its
+-- rotation. tenant-pass refuses to work in a database that PUBLIC or any
+-- managed role may connect to.
+CREATE DATABASE tenant_pass;
+REVOKE ALL ON DATABASE tenant_pass FROM PUBLIC;
+
 -- The account tenant-pass logs in as.
 CREATE ROLE tenant_pass_admin LOGIN CREATEROLE PASSWORD '<random>';
+GRANT CONNECT ON DATABASE tenant_pass TO tenant_pass_admin;
 
 -- Marker: tenant-pass only touches members of this role.
 CREATE ROLE tenant_pass_managed NOLOGIN;
@@ -46,7 +55,7 @@ GRANT t_acme TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
 注記:
 
 - `tenant_pass_admin` 自身がテナントロールを作成する場合、PostgreSQL 16 以降では `ADMIN OPTION` が自動的に付与されます（`INHERIT`/`SET` の有無は `createrole_self_grant` によります。この設定は空のままにしてください）。
-- `INHERIT FALSE, SET FALSE` により、`tenant_pass_admin` はテナントの権限を使うことも、そのロールに `SET ROLE` することもできません。できるのはロールの管理だけです。
+- `INHERIT FALSE, SET FALSE` により、`tenant_pass_admin` は **デフォルトでは** テナントの権限を使えません。これは強固な境界ではありません。`ADMIN OPTION` を持つ管理者は、`SET TRUE` 付きでそのロールを自身に付与し直すことができます。tenant-pass が決してこれを行うことはありませんが、`tenant_pass_admin` のログインを掌握した者なら可能です。このアカウントはそれに見合った方法で保護してください。
 - テナントロールに `SUPERUSER`、`CREATEROLE`、`CREATEDB`、`REPLICATION`、`BYPASSRLS` を与えないでください。いずれにせよ tenant-pass はそのようなロールを拒否します。
 - tenant-pass はトランザクションプーラーを経由せず、PostgreSQL に直接接続してください。
 
@@ -61,10 +70,10 @@ GRANT t_acme TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
 - `managed_group` のメンバーである（`pg_has_role(role, group, 'MEMBER')`）。
 - `SUPERUSER`、`CREATEROLE`、`CREATEDB`、`REPLICATION`、`BYPASSRLS` のいずれも持たない。
 - 直接的または間接的にメンバーとなっているどのロールも、これらの属性のいずれかを持たず、定義済みの `pg_*` ロール（`pg_read_all_data`、`pg_write_server_files`、`pg_execute_server_program` など）でもなく、ログインもできない。
-- どのロールに対しても `ADMIN OPTION` を持たない。
+- そのロール自身も、それがメンバーとなっているどのロールも、いかなるロールに対しても `ADMIN OPTION` を持たない。
 - `managed_group` そのものでも、tenant-pass 自身のログインロールでもない。
 
-また、自身の時計をサーバーの `clock_timestamp()` と比較し、差が `rotation.max_clock_skew` を超える場合は書き込みを拒否します。
+また、自身の時計をサーバーの `clock_timestamp()` と比較し、差が `rotation.max_clock_skew` を超える場合は書き込みを拒否します。さらに、サーバーが PostgreSQL 16 以降であり、かつ管理者接続のデータベースに PUBLIC もどの管理対象ロールも接続できない場合を除き、一切の処理を拒否します。
 
 テナントロールには、自身のオブジェクトに対する権限を（または特別な属性を持たない NOLOGIN のグループロールを通じて）付与してください。それより広いものは拒否されます。
 
@@ -78,7 +87,7 @@ GRANT t_acme TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
     "address": "pg1.internal:5432",
     "user": "tenant_pass_admin",
     "password_file": "/run/secrets/pg1-admin-password",
-    "database": "postgres",
+    "database": "tenant_pass",
     "tls": {"ca_file": "/etc/tenant-pass/db-ca.pem"}
   },
   "managed_group": "tenant_pass_managed",

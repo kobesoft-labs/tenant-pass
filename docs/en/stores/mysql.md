@@ -77,7 +77,8 @@ Under the lock, tenant-pass refuses (audit `account_refused`) unless:
 - `managed_role`@`managed_role_host` is granted to it, and **no other role** is;
 - neither the account nor the managed role has **any global privilege** (every `*_priv` column of `mysql.user` must be `N` — even `SELECT ON *.*` reaches every tenant);
 - neither has any dynamic privilege (`mysql.global_grants`, which includes `SYSTEM_USER`);
-- neither has any privilege on the `mysql`, `sys` or `performance_schema` schemas, or PROXY rights;
+- neither has any privilege on the `mysql`, `sys`, `performance_schema` or `information_schema` schemas — including through wildcard database grants such as `` GRANT … ON `%`.* `` or `` `m_sql`.* `` (database names in `mysql.db` are patterns; tenant-pass tests the system schema names against them) — or PROXY rights;
+- the managed role holds no privileges at all (it is only a marker);
 - the managed role has no roles granted to it;
 - the server's `mandatory_roles` is empty (mandatory roles apply to every account and cannot be checked per account);
 - it is not tenant-pass's own account;

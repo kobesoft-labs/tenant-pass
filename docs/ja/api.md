@@ -42,7 +42,7 @@ Content-Type: application/json
   "port": 6432,
   "database": "app",
   "username": "t_acme",
-  "password": "umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM",
+  "password": "lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE",
   "expires_at": "2026-11-03T12:13:59Z",
   "refresh_at": "2026-11-03T12:08:59Z"
 }
@@ -134,7 +134,7 @@ tenant-pass は、リクエストごとに 1 行の JSON を標準出力に書�
 | `issuer` | チケットの場合: それに署名した鍵 ID。 |
 | `result` | `ok`、またはクライアントに返したエラーコード。 |
 | `reason` | 失敗した理由: `app_auth`、`body_size`、`body_json`、`content_type`、`pass_malformed`、`pass_unknown_key`、`pass_signature`、`pass_claims`、`pass_expired`、`pass_audience`、`distinct_tenants`、`distinct_tenants_jobs`、`pass_or_ticket`、`jobs_not_enabled`、`job_issue_not_enabled`、`issuer_not_allowed`、`ticket_lifetime`、`pass_already_used`、`ticket_*`（`pass_*` と同様）、`ttl`、`sign_error`、`tenant_not_found`、`tenant_disabled`、`directory_error`、`directory_mismatch`、`unknown_node`、`account_refused`、`clock_skew`、`timeout`、`store_error`、`max_concurrent_requests`。 |
-| `error` | `directory_error` / `store_error` / `account_refused` の場合のエラーの分類（SQLSTATE、MySQL のエラー番号、Redis のエラープレフィックス、拒否理由）。サーバーのエラーメッセージはコピーされません。 |
+| `error` | `directory_error` / `store_error` / `account_refused` などの場合のエラーの分類（SQLSTATE、MySQL のエラー番号、Redis のエラープレフィックス、拒否理由）。サーバーのエラーメッセージはコピーされません。データベースサーバー以外に由来するエラー（ネットワーク、TLS、タイムアウト）はそのテキストごと記録され、ホスト名や管理ユーザー名を含むことがありますが、パスワードや鍵は決して含みません。 |
 | `changed` | ストアが変更されたかどうか。 |
 | `window`、`key_id` | 認証情報がどのウィンドウとどのローテーション鍵に属するか。 |
 

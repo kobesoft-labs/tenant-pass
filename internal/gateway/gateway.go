@@ -80,12 +80,20 @@ func New(f *File, keys *keySet, signer pass.Signer, logger *slog.Logger) (*Gatew
 
 // Handler returns the HTTP handler.
 func (g *Gateway) Handler() http.Handler {
+	// Every path is an authorization request: proxies differ in which
+	// path they call (Envoy ext_authz appends the original request path),
+	// so no path may be special. Health is served by HealthHandler on a
+	// separate listener.
+	return http.HandlerFunc(g.auth)
+}
+
+// HealthHandler serves GET /healthz for the separate health listener.
+func HealthHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/", g.auth)
 	return mux
 }
 
@@ -146,22 +154,38 @@ func (g *Gateway) match(host string) (*route, string, bool) {
 }
 
 // token extracts the session token: Authorization: Bearer first (if
-// enabled), then the cookie.
-func (g *Gateway) token(r *http.Request) string {
+// enabled), then the cookie. fromCookie reports the source.
+func (g *Gateway) token(r *http.Request) (tok string, fromCookie bool) {
 	if g.f.Identity.AuthorizationHeader {
 		vals := r.Header.Values("Authorization")
 		if len(vals) == 1 {
-			if scheme, tok, ok := strings.Cut(vals[0], " "); ok && strings.EqualFold(scheme, "Bearer") {
-				return tok
+			if scheme, t, ok := strings.Cut(vals[0], " "); ok && strings.EqualFold(scheme, "Bearer") {
+				return t, false
 			}
 		}
 	}
-	if g.f.Identity.Cookie != "" {
-		if c, err := r.Cookie(g.f.Identity.Cookie); err == nil {
-			return c.Value
+	if name := g.f.Identity.Cookie; name != "" {
+		cs := r.CookiesNamed(name)
+		// Several cookies with the session name (for example one tossed
+		// in from a sibling subdomain with Domain=.example.com) are
+		// ambiguous: using the first could log the user into an
+		// attacker's session. Treat as no session.
+		if len(cs) == 1 {
+			return cs[0].Value, true
 		}
 	}
-	return ""
+	return "", false
+}
+
+// fetchMetadataAllows applies the cookie Fetch Metadata policy.
+func fetchMetadataAllows(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "same-site", "cross-site":
+		return r.Header.Get("Sec-Fetch-Mode") == "navigate" && r.Header.Get("Sec-Fetch-User") == "?1"
+	}
+	return false // missing or unknown: no pass
 }
 
 var errNoToken = errors.New("no token")
@@ -250,7 +274,7 @@ func (g *Gateway) verifyToken(ctx context.Context, raw string) ([]string, map[st
 		Issuer:      id.Issuer,
 		AnyAudience: jwt.Audience(id.Audiences),
 		Time:        now,
-	}, time.Duration(id.Leeway)); err != nil {
+	}, time.Duration(*id.Leeway)); err != nil {
 		return nil, nil, err
 	}
 	for name, want := range id.RequiredClaims {
@@ -341,7 +365,13 @@ func (g *Gateway) auth(w http.ResponseWriter, r *http.Request) {
 	}
 	attrs = append(attrs, "app", rt.App)
 
-	tenants, identity, err := g.verify(r.Context(), g.token(r))
+	raw, fromCookie := g.token(r)
+	if fromCookie && g.f.Identity.CookieFetchMetadata == "enforce" && !fetchMetadataAllows(r) {
+		// Not an error: just no pass for this subrequest.
+		raw = ""
+		attrs = append(attrs, "fetch_metadata", "refused")
+	}
+	tenants, identity, err := g.verify(r.Context(), raw)
 	if err != nil {
 		attrs = append(attrs, "error", err.Error())
 		if g.f.Unauthenticated == "deny" {

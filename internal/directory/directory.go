@@ -92,6 +92,7 @@ type Static struct {
 // NewStatic validates the tenants and builds the directory.
 func NewStatic(tenants []StaticTenant) (*Static, error) {
 	d := &Static{byHost: map[string]*StaticTenant{}, byID: map[string]*StaticTenant{}}
+	accounts := map[string]string{} // node/account -> tenant
 	for i := range tenants {
 		t := &tenants[i]
 		tt := Tenant{ID: t.ID, Node: t.Node, Account: t.Account}
@@ -104,6 +105,12 @@ func NewStatic(tenants []StaticTenant) (*Static, error) {
 		if _, dup := d.byID[t.ID]; dup {
 			return nil, fmt.Errorf("static tenant %q: duplicate id", t.ID)
 		}
+		// Two tenants on one account would share credentials (and data).
+		acct := t.Node + "/" + t.Account
+		if other, dup := accounts[acct]; dup {
+			return nil, fmt.Errorf("static tenants %q and %q use the same account %s", other, t.ID, acct)
+		}
+		accounts[acct] = t.ID
 		d.byID[t.ID] = t
 		for _, h := range t.Hosts {
 			if _, dup := d.byHost[h]; dup {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -44,7 +43,11 @@ type File struct {
 	// pass, so the application can show a login page but cannot obtain
 	// tenant credentials; "deny" answers 401.
 	Unauthenticated string `json:"unauthenticated"`
-	LogLevel        string `json:"log_level"`
+	// HealthListen, if set, serves GET /healthz on a separate address.
+	// The forward-auth listener treats every path as an authorization
+	// request (Envoy appends the original path), so it has no health path.
+	HealthListen string `json:"health_listen"`
+	LogLevel     string `json:"log_level"`
 }
 
 // PassSettings controls the passes the gateway signs.
@@ -79,8 +82,9 @@ type IdentitySettings struct {
 	Cookie              string `json:"cookie"`
 	// TenantClaim is the claim holding the user's tenant ID, or a list of
 	// tenant IDs. Dotted paths reach into nested objects ("org.id").
-	TenantClaim string          `json:"tenant_claim"`
-	Leeway      config.Duration `json:"leeway"`
+	TenantClaim string `json:"tenant_claim"`
+	// Leeway (default 30s) is a pointer so that an explicit "0s" is kept.
+	Leeway *config.Duration `json:"leeway"`
 	// MaxTokenAge rejects tokens whose iat is older than this (0: no
 	// limit). Useful with long-lived session tokens.
 	MaxTokenAge config.Duration `json:"max_token_age"`
@@ -96,6 +100,17 @@ type IdentitySettings struct {
 	// proxy can strip the token. An application that never sees session
 	// tokens cannot replay them to obtain passes.
 	ForwardClaims map[string]string `json:"forward_claims"`
+	// CookieFetchMetadata ("enforce", default, or "off") controls the
+	// Fetch Metadata check for tokens taken from the cookie. Browsers send
+	// cookies with requests a page triggers to sibling hosts (images,
+	// scripts, redirects), so a compromised application could make the
+	// user's browser request every tenant host the user belongs to and
+	// collect passes for all of them. With "enforce", a cookie session is
+	// used only for same-origin requests, requests the user typed or
+	// bookmarked (Sec-Fetch-Site: none), and top-level navigations the
+	// user activated (a click: Sec-Fetch-Mode: navigate, Sec-Fetch-User:
+	// ?1). Requests without Fetch Metadata headers get no pass.
+	CookieFetchMetadata string `json:"cookie_fetch_metadata"`
 }
 
 // Route maps request hosts to the application that serves them.
@@ -130,16 +145,9 @@ var (
 // LoadFile reads and strictly parses a gateway configuration file and
 // applies defaults.
 func LoadFile(path string) (*File, error) {
-	st, err := os.Stat(path)
+	b, err := secret.ReadTrusted(path)
 	if err != nil {
-		return nil, err
-	}
-	if st.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("config: %s is writable by group or others", path)
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	var f File
 	if err := strictjson.Decode(b, &f); err != nil {
@@ -160,8 +168,12 @@ func LoadFile(path string) (*File, error) {
 	if len(f.Identity.Algorithms) == 0 {
 		f.Identity.Algorithms = []string{"RS256", "ES256", "EdDSA"}
 	}
-	if f.Identity.Leeway == 0 {
-		f.Identity.Leeway = config.Duration(30 * time.Second)
+	if f.Identity.Leeway == nil {
+		d := config.Duration(30 * time.Second)
+		f.Identity.Leeway = &d
+	}
+	if f.Identity.CookieFetchMetadata == "" {
+		f.Identity.CookieFetchMetadata = "enforce"
 	}
 	if f.Unauthenticated == "" {
 		f.Unauthenticated = "pass_through"
@@ -191,7 +203,7 @@ func (f *File) validate() ([]route, error) {
 		if !loopback && !f.AllowInsecurePlaintext {
 			fail("insecure_plaintext_http on a non-loopback address requires allow_insecure_plaintext (testing only)")
 		}
-		if f.TLS != (config.ServerTLS{}) {
+		if !f.TLS.IsZero() {
 			fail("insecure_plaintext_http cannot be combined with tls")
 		}
 	} else if f.TLS.CertFile == "" || f.TLS.KeyFile == "" {
@@ -205,6 +217,11 @@ func (f *File) validate() ([]route, error) {
 		fail("listen %q must be host:port", f.Listen)
 	} else if ip := net.ParseIP(lh); (ip == nil || !ip.IsLoopback()) && f.CallerSecretFile == "" && f.TLS.ClientCAFile == "" {
 		fail("callers must be authenticated when listening on a non-loopback address: set caller_secret_file or tls.client_ca_file")
+	}
+	if f.TLS.ClientCAFile != "" && len(f.TLS.ClientURIs) == 0 && len(f.TLS.ClientDNSNames) == 0 {
+		// A CA alone is not enough: in a service mesh, every workload
+		// (including the applications) holds a certificate from it.
+		fail("tls.client_ca_file requires tls.client_uris or tls.client_dns_names naming the proxy")
 	}
 	if f.CallerSecretFile != "" {
 		if v, err := secret.ReadFile(f.CallerSecretFile); err != nil {
@@ -250,7 +267,7 @@ func (f *File) validate() ([]route, error) {
 	if !claimPath.MatchString(id.TenantClaim) {
 		fail("identity.tenant_claim is required (claim name or dotted path)")
 	}
-	if id.Leeway < 0 || time.Duration(id.Leeway) > 5*time.Minute {
+	if id.Leeway == nil || *id.Leeway < 0 || time.Duration(*id.Leeway) > 5*time.Minute {
 		fail("identity.leeway must be between 0 and 5m")
 	}
 	for hdr, claim := range id.ForwardClaims {
@@ -272,6 +289,11 @@ func (f *File) validate() ([]route, error) {
 		fail("identity.max_token_age must not be negative")
 	}
 
+	switch f.Identity.CookieFetchMetadata {
+	case "enforce", "off":
+	default:
+		fail(`identity.cookie_fetch_metadata must be "enforce" or "off"`)
+	}
 	switch f.Unauthenticated {
 	case "pass_through", "deny":
 	default:
