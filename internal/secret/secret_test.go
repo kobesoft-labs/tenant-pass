@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -34,6 +35,7 @@ func TestReadFile(t *testing.T) {
 		"too big":        write(t, strings.Repeat("x", MaxFileSize+1), 0o600),
 		"directory":      t.TempDir(),
 		"missing":        filepath.Join(t.TempDir(), "nope"),
+		"fifo":           mkfifo(t),
 	} {
 		if _, err := ReadFile(p); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -74,4 +76,12 @@ func TestLooksWeak(t *testing.T) {
 	if LooksWeak([]byte("pQ4m0g2Yk3qvQW1o8bqgK3n4cS1u9xJ0")) {
 		t.Error("false positive")
 	}
+}
+
+func mkfifo(t *testing.T) string {
+	p := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	return p
 }

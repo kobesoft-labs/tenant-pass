@@ -189,3 +189,22 @@ func FuzzVerify(f *testing.F) {
 		}
 	})
 }
+
+// A pass "signed" under the identity point (R = identity, s = 0) must not
+// verify, even if a caller puts such a key in Verifier.Keys directly.
+func TestSmallOrderKeyRejected(t *testing.T) {
+	identity := make([]byte, 32)
+	identity[0] = 1
+	m := []byte(`{"aud":"billing","tenant":"victim","iat":"2026-11-03T12:00:00Z","exp":"2026-11-03T12:00:30Z","jti":"AAAAAAAAAAAAAAAAAAAAAA"}`)
+	f, _ := json.Marshal(footer{Kid: "gw"})
+	tok, err := paseto.SignWith(func([]byte) ([]byte, error) {
+		return append(append([]byte(nil), identity...), make([]byte, 32)...), nil
+	}, m, f, []byte(ImplicitAssertion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &Verifier{Keys: map[string]ed25519.PublicKey{"gw": identity}, Now: func() time.Time { return t0 }}
+	if _, err := v.Verify(tok, "billing"); err == nil {
+		t.Fatal("forged pass accepted under the identity key")
+	}
+}

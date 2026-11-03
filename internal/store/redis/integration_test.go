@@ -81,7 +81,7 @@ func setup(t *testing.T) (*Store, *rotation.Schedule, []string) {
 	for _, a := range as {
 		c := bootstrap(t, a)
 		for _, cmd := range [][]any{
-			{"ACL", "DELUSER", "tenant_pass_admin", "t_acme", "t_beta", "t_admin", "t_sel", "t_slow", "t_allkeys", "t_nomark", "t_allchan", "t_scan", "t_partial", "t_markadmin", "t_onlyone"},
+			{"ACL", "DELUSER", "tenant_pass_admin", "t_acme", "t_beta", "t_admin", "t_sel", "t_slow", "t_allkeys", "t_nomark", "t_allchan", "t_scan", "t_partial", "t_markadmin", "t_onlyone", "t_wildkey", "t_wildchan"},
 			// Documented admin user (docs/en/stores/redis.md).
 			{"ACL", "SETUSER", "tenant_pass_admin", "on", ">adminpw", "-@all",
 				"+acl|getuser", "+acl|setuser", "+acl|users", "+acl|dryrun", "+acl|save", "+time", "+ping", "+auth", "+hello"},
@@ -99,6 +99,9 @@ func setup(t *testing.T) (*Store, *rotation.Schedule, []string) {
 			// SCAN sees every key name; a partial pattern reaches other tenants.
 			{"ACL", "SETUSER", "t_scan", "on", "resetchannels", "&tenant-pass:managed", "-@all", "+get", "+scan", "~t:scan:*"},
 			{"ACL", "SETUSER", "t_partial", "on", "resetchannels", "&tenant-pass:managed", "-@all", "+get", "~[a-s]*"},
+			// Patterns that start with a wildcard reach every tenant.
+			{"ACL", "SETUSER", "t_wildkey", "on", "resetchannels", "&tenant-pass:managed", "-@all", "+get", "~*:secret"},
+			{"ACL", "SETUSER", "t_wildchan", "on", "resetchannels", "&tenant-pass:managed", "&*:events", "-@all", "+subscribe", "~t:wc:*"},
 			// A privileged user carrying the marker: refused, and the
 			// sweeper must leave its password alone.
 			{"ACL", "SETUSER", "t_markadmin", "on", ">admin-keep", "resetchannels", "&tenant-pass:managed", "-@all", "+@admin"},
@@ -280,7 +283,7 @@ func TestIntegrationClockSkew(t *testing.T) {
 func TestIntegrationRefusals(t *testing.T) {
 	s, _, as := setup(t)
 	ctx := context.Background()
-	for _, u := range []string{"t_admin", "t_sel", "t_missing", "default", "tenant_pass_admin", "t_slow", "t_allkeys", "t_allchan", "t_nomark", "t_scan", "t_partial", "t_markadmin"} {
+	for _, u := range []string{"t_admin", "t_sel", "t_missing", "default", "tenant_pass_admin", "t_slow", "t_allkeys", "t_allchan", "t_nomark", "t_scan", "t_partial", "t_markadmin", "t_wildkey", "t_wildchan"} {
 		if _, err := s.Issue(ctx, u, false); !errors.Is(err, store.ErrRefused) {
 			t.Errorf("%s: err = %v, want refused", u, err)
 		}

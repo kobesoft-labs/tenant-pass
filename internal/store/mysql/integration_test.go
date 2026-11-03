@@ -236,6 +236,54 @@ func TestIntegrationClockSkew(t *testing.T) {
 	}
 }
 
+// The managed role is only a marker: if it holds privileges, every
+// managed account would hold them, so tenant-pass refuses to work.
+func TestIntegrationManagedRoleMustBeEmpty(t *testing.T) {
+	s, _ := setup(t)
+	root := open(t, endpoint(t, "root", "rootpw"))
+	defer root.Close()
+	if _, err := root.Exec("GRANT SELECT ON acme.* TO tenant_pass_managed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Issue(context.Background(), "t_acme", false); !errors.Is(err, store.ErrRefused) {
+		t.Fatalf("err = %v, want refused", err)
+	}
+}
+
+func TestIntegrationMandatoryRolesRefused(t *testing.T) {
+	s, _ := setup(t)
+	root := open(t, endpoint(t, "root", "rootpw"))
+	defer root.Close()
+	if _, err := root.Exec("SET GLOBAL mandatory_roles = 'tenant_pass_managed'"); err != nil {
+		t.Fatal(err)
+	}
+	defer root.Exec("SET GLOBAL mandatory_roles = ''")
+	if _, err := s.Issue(context.Background(), "t_acme", false); !errors.Is(err, store.ErrRefused) {
+		t.Fatalf("err = %v, want refused", err)
+	}
+}
+
+// The wildcard-grant check must work in every sql_mode.
+func TestIntegrationNoBackslashEscapes(t *testing.T) {
+	root := open(t, endpoint(t, "root", "rootpw"))
+	defer root.Close()
+	var mode string
+	if err := root.QueryRow("SELECT @@GLOBAL.sql_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Exec("SET GLOBAL sql_mode = CONCAT(@@GLOBAL.sql_mode, ',NO_BACKSLASH_ESCAPES')"); err != nil {
+		t.Fatal(err)
+	}
+	defer root.Exec("SET GLOBAL sql_mode = ?", mode)
+	s, _ := setup(t) // new connections pick up the global mode
+	if _, err := s.Issue(context.Background(), "t_acme", false); err != nil {
+		t.Fatalf("issue under NO_BACKSLASH_ESCAPES: %v", err)
+	}
+	if _, err := s.Issue(context.Background(), "t_wild", false); !errors.Is(err, store.ErrRefused) {
+		t.Fatalf("wildcard grant under NO_BACKSLASH_ESCAPES: %v", err)
+	}
+}
+
 func TestIntegrationRefusals(t *testing.T) {
 	s, _ := setup(t)
 	for _, u := range []string{"t_super", "t_dyn", "t_norole", "t_missing", "root", "tenant_pass_admin",

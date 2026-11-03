@@ -9,6 +9,11 @@ import (
 	"syscall"
 )
 
+// openNoBlock opens path read-only without blocking on FIFOs or devices.
+func openNoBlock(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}
+
 // checkOwner requires the file to be owned by the effective user or by
 // root. A file owned by another unprivileged user can be rewritten by
 // that user regardless of its mode bits (chmod is the owner's right).

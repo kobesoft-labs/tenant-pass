@@ -24,8 +24,10 @@ services:
     stop_grace_period: 20s
     volumes:
       - ./config.json:/etc/tenant-pass/config.json:ro
-    secrets: [tenant-pass.key, rotation-2026-11, pg1-admin-password]
+    secrets: [tenant-pass.key, rotation-2026-11.key, pg1-admin-password]
 ```
+
+Secret and trust files must be owned by root or by the user the container runs as (the image runs as uid 65532), and not be writable by group or others. Docker and Kubernetes secret mounts are owned by root by default.
 
 ## Bootstrapping
 
@@ -101,7 +103,9 @@ cosign verify ghcr.io/kobesoft-labs/tenant-pass:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-Deploy by digest (`ghcr.io/…@sha256:…`), not by tag.
+The same applies to `ghcr.io/kobesoft-labs/tenant-pass-gateway`. Deploy by digest (`ghcr.io/…@sha256:…`), not by tag.
+
+Maintainers: make the GHCR packages public after the first release, and protect `v*` tags with a repository ruleset (the signing identity trusts tags matching `v*` pushed to this repository).
 
 ## Upgrades
 

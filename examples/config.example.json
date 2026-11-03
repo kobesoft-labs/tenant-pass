@@ -48,6 +48,7 @@
         "address": "pg1.internal:5432",
         "user": "tenant_pass_admin",
         "password_file": "/run/secrets/pg1-admin-password",
+        "database": "tenant_pass",
         "tls": {"ca_file": "/etc/tenant-pass/db-ca.pem"}
       },
       "managed_group": "tenant_pass_managed",

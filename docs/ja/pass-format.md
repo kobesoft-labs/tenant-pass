@@ -92,6 +92,8 @@ tenant-pass は正規化を行いません。ゲートウェイは厳密に次�
 v4.public.eyJhdWQiOiJiaWxsaW5nIiwiaG9zdCI6ImFjbWUuZXhhbXBsZS5jb20iLCJpYXQiOiIyMDI2LTExLTAzVDEyOjAwOjAwWiIsImV4cCI6IjIwMjYtMTEtMDNUMTI6MDA6MzBaIiwianRpIjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSJ9lGRulfEQdJnx_Iagf4Fp94_8eSIifNPHT82HGA8KqWhSX_KikCQafPjF2Ntupw3XnYtRoZ6xe1-uf46uZcHoDQ.eyJraWQiOiJndzEifQ
 ```
 
+検証器は、位数の小さい Ed25519 公開鍵や、正準でない形式でエンコードされた Ed25519 公開鍵も拒否しなければなりません（Go の `ed25519.Verify` は、そうした鍵のもとで簡単に偽造できる署名を受け付けてしまいます）。`pass` パッケージはこれを拒否します。
+
 実装はこのトークンをバイト単位で完全に同じように生成する必要があり、tenant-pass の検証器は（時計が `iat` と `exp` の間にあれば）これを受け付けます。テストは `pass/pass_test.go` の `TestPublishedVector` です。基盤となる PASETO 実装は、公式の PASETO v4 テストベクターで検証されています。
 
 ## 例

@@ -45,9 +45,11 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/kobesoft-labs/tenant-pass/internal/hostname"
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 	"github.com/kobesoft-labs/tenant-pass/internal/paseto"
 	"github.com/kobesoft-labs/tenant-pass/internal/strictjson"
 )
@@ -247,6 +249,12 @@ func verifyToken(token, assertion string, keys map[string]ed25519.PublicKey) ([]
 	if !ok {
 		return nil, "", ErrUnknownKey
 	}
+	// Small-order or non-canonical public keys accept forged signatures
+	// (Go's ed25519.Verify does not reject them). Callers of this package
+	// may build key maps themselves, so check here too.
+	if !keyIsSafe(key) {
+		return nil, "", ErrUnknownKey
+	}
 	m, _, err := paseto.Verify(key, token, []byte(assertion))
 	switch {
 	case errors.Is(err, paseto.ErrSignature):
@@ -255,6 +263,17 @@ func verifyToken(token, assertion string, keys map[string]ed25519.PublicKey) ([]
 		return nil, "", ErrMalformed
 	}
 	return m, f.Kid, nil
+}
+
+var safeKeys sync.Map // string(key) -> bool
+
+func keyIsSafe(k ed25519.PublicKey) bool {
+	if v, ok := safeKeys.Load(string(k)); ok {
+		return v.(bool)
+	}
+	ok := kms.CheckEd25519PublicKey(k) == nil
+	safeKeys.Store(string(k), ok)
+	return ok
 }
 
 // checkTimes applies the lifetime and time-window rules.

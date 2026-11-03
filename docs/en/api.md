@@ -43,8 +43,8 @@ Content-Type: application/json
   "database": "app",
   "username": "t_acme",
   "password": "lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE",
-  "expires_at": "2026-11-03T12:13:59Z",
-  "refresh_at": "2026-11-03T12:08:59Z"
+  "expires_at": "2026-11-03T12:08:59Z",
+  "refresh_at": "2026-11-03T12:03:59Z"
 }
 ```
 
@@ -70,7 +70,7 @@ The body is always `{"error": "<code>"}`. The reason is never returned; it is in
 | 400 | `invalid_pass` | Pass rejected: malformed, unknown key, bad signature, invalid claims, expired, or `aud` is not the calling application. |
 | 400 | `invalid_ticket` | Job ticket rejected, for the same reasons. |
 | 401 | `unauthorized` | Application authentication failed. Has `WWW-Authenticate: Bearer realm="tenant-pass"`. |
-| 403 | `denied` | No such tenant, the application is not allowed for it, the tenant is disabled, the store refused the account, or (tickets) job tickets are not enabled for the application. |
+| 403 | `denied` | No such tenant, the application is not allowed for it, the tenant is disabled, the store refused the account, or (tickets) job tickets are not enabled for the application, the issuer is not allowed, or the pass was already exchanged for a ticket. |
 | 404 | `not_found` | Unknown path. |
 | 405 | `method_not_allowed` | Not `POST`. |
 | 413 | `request_too_large` | Body over 4096 bytes. |
@@ -125,19 +125,20 @@ Backend checks are cached for 5 s.
 tenant-pass writes one JSON line per request to standard output: `"msg":"credential"` for `/v1/credentials`, `"msg":"job_ticket"` for `/v1/job-tickets`:
 
 ```json
-{"time":"2026-11-03T12:00:01Z","level":"INFO","msg":"credential","request_id":"43f007226bb0e766","app":"billing","repair":false,"jti":"hamSSKegCc-kk82SdW2dpw","host":"acme.example.com","tenant":"acme","node":"pg1","account":"t_acme","store":"postgres","window":1993007,"key_id":"k1","changed":true,"expires_at":"2026-11-03T12:13:59Z","result":"ok","duration_ms":7}
+{"time":"2026-11-03T12:00:01Z","level":"INFO","msg":"credential","request_id":"43f007226bb0e766","app":"billing","repair":false,"jti":"hamSSKegCc-kk82SdW2dpw","host":"acme.example.com","tenant":"acme","node":"pg1","account":"t_acme","store":"postgres","window":1993007,"key_id":"k1","changed":true,"expires_at":"2026-11-03T12:08:59Z","result":"ok","duration_ms":7}
 ```
 
 | Field | Meaning |
 | --- | --- |
+| `request_id` | Random ID of this request. |
 | `via` | `pass` or `ticket`. |
 | `issuer` | For tickets: the key ID that signed it. |
 | `result` | `ok` or the error code returned to the client. |
-| `reason` | Why it failed: `app_auth`, `body_size`, `body_json`, `content_type`, `pass_malformed`, `pass_unknown_key`, `pass_signature`, `pass_claims`, `pass_expired`, `pass_audience`, `distinct_tenants`, `distinct_tenants_jobs`, `pass_or_ticket`, `jobs_not_enabled`, `job_issue_not_enabled`, `issuer_not_allowed`, `ticket_lifetime`, `pass_already_used`, `ticket_*` (as `pass_*`), `ttl`, `sign_error`, `tenant_not_found`, `tenant_disabled`, `directory_error`, `directory_mismatch`, `unknown_node`, `account_refused`, `clock_skew`, `timeout`, `store_error`, `max_concurrent_requests`. |
+| `reason` | Why it failed: `app_auth`, `body_size`, `body_json`, `content_type`, `pass_malformed`, `pass_unknown_key`, `pass_signature`, `pass_claims`, `pass_expired`, `pass_audience`, `distinct_tenants`, `distinct_tenants_jobs`, `pass_or_ticket`, `jobs_not_enabled`, `job_issue_not_enabled`, `issuer_not_allowed`, `ticket_lifetime`, `pass_already_used`, `ticket_*` (as `pass_*`), `ttl`, `sign_error`, `pass_already_used`, `body_read`, `method`, `path`, `tenant_not_found`, `tenant_disabled`, `directory_error`, `directory_mismatch`, `unknown_node`, `account_refused`, `clock_skew`, `timeout`, `store_error`, `max_concurrent_requests`. |
 | `error` | For `directory_error` / `store_error` / `account_refused` and similar: the error class (SQLSTATE, MySQL error number, Redis error prefix, refusal reason). Server error messages are not copied. Errors that do not come from the database server (network, TLS, timeouts) are logged with their text, which can include host names and the admin user name, but never passwords or keys. |
 | `changed` | Whether the store was modified. |
 | `window`, `key_id` | Which window and rotation key the credential belongs to. |
 
 Never logged: passwords, verifiers, hashes, passes, job tickets, app tokens, rotation keys. The client IP is not logged by tenant-pass; take it from your load balancer if needed.
 
-Levels: `INFO` for success, `WARN` for client errors, `ERROR` for `directory_error`, `store_error`, `account_refused`, `clock_skew`, `unknown_node`, `directory_mismatch`. See [operations.md](operations.md#monitoring) for what to alert on.
+Levels: `INFO` for success, `WARN` for client errors, `ERROR` for `directory_error`, `store_error`, `account_refused`, `clock_skew`, `timeout`, `unknown_node`, `directory_mismatch`, `sign_error`. See [operations.md](operations.md#monitoring) for what to alert on.

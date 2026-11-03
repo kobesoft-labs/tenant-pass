@@ -102,6 +102,12 @@ Passes always carry the **tenant ID** (`tenant` claim), with `aud` = the route's
 | --- | --- | --- |
 | `listen` | `127.0.0.1:9180` | Listen address. |
 | `tls` | | `cert_file`, `key_file`; `client_ca_file` makes client certificates **required**, and then `client_uris` and/or `client_dns_names` must name the proxy: a certificate from the CA is accepted only if one of its SANs matches (in a service mesh every workload, including the applications, has a certificate from the same CA). |
+| `max_concurrent_requests` | `256` | In-flight authorization requests; excess requests get `503`. |
+| `identity.leeway` | `30s` | Clock tolerance for `exp`/`nbf`/`iat` (0–5m; `"0s"` means none). |
+| `identity.single_tenant_tokens` | `false` | Require the tenant claim to name exactly one tenant (see "Cookie sessions across tenant hosts"). |
+| `identity.cookie_fetch_metadata` | `enforce` | Fetch Metadata check for cookie tokens: `enforce` or `off`. |
+| `allow_insecure_plaintext` | `false` | Testing only: allows plaintext settings off loopback. |
+| `log_level` | `info` | `debug`, `info`, `warn`, `error`. |
 | `health_listen` | | Optional address for `GET /healthz`. The forward-auth listener treats every path as an authorization request, so it has no health path. |
 | `insecure_plaintext_http` | `false` | Plain HTTP. Allowed on a loopback address (sidecar next to the proxy); elsewhere requires `allow_insecure_plaintext` (testing only). |
 | `caller_secret_file` | | If set, callers must send `Tenant-Pass-Gateway-Secret` with this value (≥ 16 characters). On a non-loopback `listen`, `caller_secret_file` or `tls.client_ca_file` is **required**. |
@@ -230,23 +236,24 @@ Rules: a forwarded claim must be a string of printable ASCII (at most 256 bytes)
 
 For cookie sessions, use a dedicated cookie for the identity provider session and remove it in the proxy (nginx: rewrite `$http_cookie`; Caddy: a `request_header` with a regular-expression replacement), so the application keeps its own cookies but never sees the IdP session.
 
-## Cookie sessions and Fetch Metadata
+## Cookie sessions across tenant hosts
 
-Browsers attach cookies to requests a page triggers to sibling hosts. Without a further check, a compromised application on `acme.billing.example.com` could embed `<img src="https://t2.billing.example.com/…">` for every tenant a user belongs to; the proxy would forward each request, with a pass for that tenant, to the same compromised application.
+When one application serves the hosts of many tenants and a user's session cookie is sent to all of them (a cookie with `Domain=.billing.example.com`), a compromised application can make the user's browser visit **other** tenants' hosts and collect a pass for each tenant the user belongs to. It can embed them (images, iframes), redirect through them, or navigate to them. Every such request goes through the proxy to the same compromised application.
 
-With `identity.cookie_fetch_metadata: "enforce"` (the default), a token from the **cookie** is used only when the browser's Fetch Metadata headers show:
+**The boundary that stops this is session scoping, not request headers:**
 
-- `Sec-Fetch-Site: same-origin` (the page is on the same host), or
-- `Sec-Fetch-Site: none` (the user typed the address or used a bookmark), or
-- a top-level navigation the user activated: `Sec-Fetch-Mode: navigate` **and** `Sec-Fetch-User: ?1` (a click on a link — one tenant per click, visible to the user).
+1. **Host-only session cookies.** Issue the session cookie per tenant host, without a `Domain` attribute, ideally with the `__Host-` prefix (`Set-Cookie: __Host-session=…; Secure; Path=/; HttpOnly; SameSite=Lax`). The browser then sends the acme session only to `acme.billing.example.com`, and a visit to another tenant's host carries no session at all.
+2. **Single-tenant tokens.** Set `identity.single_tenant_tokens: true` and have your login service issue one token per tenant (a tenant claim naming exactly one tenant). A token for acme can then never yield a pass for any other tenant, whatever the browser is made to do.
 
-Otherwise (images, scripts, fetches, redirects or script-driven navigations from another host, or no Fetch Metadata headers at all) the request is treated as having no session: no pass. Tokens in the `Authorization` header are not affected (browsers do not send them automatically). Several cookies with the session name are also treated as no session (a cookie tossed in from a sibling host could otherwise log the user into an attacker's session).
+Users who belong to several tenants then log in (or use single sign-on) per tenant host. Use both measures for any deployment where tenants share an application.
 
-The proxy must pass `Sec-Fetch-*` headers to the gateway (Caddy and nginx do by default; see Traefik and Envoy above). Set `"off"` only for non-browser clients that use cookies.
+**Fetch Metadata (defence in depth).** With `identity.cookie_fetch_metadata: "enforce"` (the default), a token from the **cookie** is used only when the browser's Fetch Metadata headers show a same-origin request (`Sec-Fetch-Site: same-origin`), a typed address or bookmark (`none`), or a top-level navigation the user activated (`Sec-Fetch-Mode: navigate` and `Sec-Fetch-User: ?1`); requests without Fetch Metadata get no pass. This stops passive cross-host requests (an `<img>` pointing at another tenant's host). It is **not** a boundary against a compromised application, because that application also serves the other tenants' pages. It can frame or navigate to them and have them make same-origin requests, and user activation survives redirects. The proxy must pass `Sec-Fetch-*` headers to the gateway (Caddy and nginx do by default; see Traefik and Envoy above). Set `"off"` only for non-browser clients that use cookies.
+
+Tokens in the `Authorization` header are not affected (browsers do not send them automatically). Several cookies with the session name are treated as no session (a cookie tossed in from a sibling host could otherwise log the user into an attacker's session).
 
 ## Residual risks
 
-- **If the application still sees session tokens**, a compromised application can replay a user's token through the proxy and obtain passes for every tenant in that user's tenant claim, until the token expires. Use `forward_claims` and strip the token (above). Otherwise: keep session tokens short-lived or set `identity.max_token_age`, and give staff accounts that belong to many tenants separate, short sessions. Direct calls to the gateway are blocked by caller authentication, which is mandatory off loopback.
+- **Multi-tenant sessions.** Unless sessions are scoped per tenant (host-only cookies and `single_tenant_tokens`, above), a compromised application can obtain passes for every tenant in a user's tenant claim while the user's session is valid — by replaying a token it has seen, or by making the user's browser visit the other tenants' hosts. `forward_claims` with token stripping removes the replay path; caller authentication (mandatory off loopback) blocks direct calls to the gateway; Fetch Metadata blocks passive cross-host requests. Only session scoping closes the browser path completely.
 - **Load on the KMS.** With a Transit signing key, every authenticated request causes one Vault sign operation. Size Vault accordingly, and rate-limit at the proxy if needed.
 
 ## Deployment

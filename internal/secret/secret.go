@@ -56,7 +56,9 @@ func readChecked(path string, max int64) ([]byte, os.FileMode, error) {
 	if path == "" {
 		return nil, 0, errors.New("empty path")
 	}
-	f, err := os.Open(path)
+	// openNoBlock: opening a FIFO with a plain open would block forever
+	// waiting for a writer; the regular-file check below then refuses it.
+	f, err := openNoBlock(path)
 	if err != nil {
 		return nil, 0, err
 	}

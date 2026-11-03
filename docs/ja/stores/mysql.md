@@ -82,7 +82,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON acme.* TO t_acme;   -- what the tenant n
 - 管理対象ロールにロールが付与されていない。
 - サーバーの `mandatory_roles` が空である（必須ロールはすべてのアカウントに適用され、アカウントごとにチェックできないため）。
 - tenant-pass 自身のアカウントではない。
-- レプリカの時計が、`rotation.max_clock_skew` の範囲内でサーバーの `NOW(6)` と一致している。
+- レプリカの時計が、`rotation.max_clock_skew` の範囲内でサーバーの `UNIX_TIMESTAMP()` と一致している。
+
+**接続の枯渇。** `ALTER USER t_acme WITH MAX_USER_CONNECTIONS 20` でテナントの接続数を制限し、テナントが `max_connections` をすべて使い切ってローテーションを妨げることがないようにしてください。
 
 テナントアカウントは、自身のデータベースまたはテーブルに対する権限だけを持つことが想定されています（`GRANT … ON acme.* TO t_acme`）。
 

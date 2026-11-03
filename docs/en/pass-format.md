@@ -92,6 +92,8 @@ Expected token (Ed25519 is deterministic, so a conforming signer produces exactl
 v4.public.eyJhdWQiOiJiaWxsaW5nIiwiaG9zdCI6ImFjbWUuZXhhbXBsZS5jb20iLCJpYXQiOiIyMDI2LTExLTAzVDEyOjAwOjAwWiIsImV4cCI6IjIwMjYtMTEtMDNUMTI6MDA6MzBaIiwianRpIjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSJ9lGRulfEQdJnx_Iagf4Fp94_8eSIifNPHT82HGA8KqWhSX_KikCQafPjF2Ntupw3XnYtRoZ6xe1-uf46uZcHoDQ.eyJraWQiOiJndzEifQ
 ```
 
+Verifiers must also refuse small-order and non-canonically encoded Ed25519 public keys (Go's `ed25519.Verify` accepts trivially forged signatures under them); the `pass` package does.
+
 Your implementation should produce this token byte for byte, and tenant-pass's verifier (with a clock between `iat` and `exp`) accepts it. The test is `TestPublishedVector` in `pass/pass_test.go`. The underlying PASETO implementation is checked against the official PASETO v4 test vectors.
 
 ## Examples

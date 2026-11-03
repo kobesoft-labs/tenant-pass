@@ -122,6 +122,8 @@ A refused account yields `403 denied` to the client and an `account_refused` err
 
 The checks are deliberately strict about **administrative and server-wide** privileges: anything that reaches beyond one account's own objects at the server level (superuser-like attributes, predefined roles, global grants, wildcard database grants, unrestricted key patterns) is refused rather than evaluated.
 
+For MySQL the system schemas are `mysql`, `sys`, `performance_schema` and `information_schema`; for Redis, key and channel patterns must start with a literal prefix.
+
 What the checks cannot see in general is a grant on **another tenant's** objects (for example `GRANT SELECT ON acme.invoices TO t_beta`, or a NOLOGIN group that owns shared tables). Keeping each tenant's privileges to its own database, schema, tables or key prefix is the job of your provisioning, and tenant-pass relies on it.
 
 ## Statelessness and replicas

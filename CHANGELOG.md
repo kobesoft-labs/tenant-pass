@@ -23,7 +23,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Each pass can be exchanged for at most one job ticket (per replica).
 - Documentation in English and Japanese.
 
-### Security (third review)
+### Security hardening (pre-release reviews)
 
 - Reject small-order and non-canonical Ed25519 public keys (gateway keys, job ticket issuers, Transit keys): a degenerate key would let anyone forge passes.
 - Trust anchors (public keys, CA bundles, certificates, JWKS, configuration) get the same integrity checks as secrets, including file owner; files are opened once and checked on the open descriptor; TLS key pairs are loaded from the checked bytes.
@@ -36,3 +36,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - Job tickets: per-application replay quota with FIFO expiry; a pass is released if issuing fails.
 - Ambiguous client certificates (several matching URI SANs) are refused; static directory refuses two tenants sharing an account; LRU derive cache; explicit zero leeway honoured; `check-config` runs every startup check.
 - Release workflow: images pushed with SBOM and SLSA provenance and signed with Sigstore.
+- Redis: key and channel patterns must start with a literal prefix (`~*:secret`, `~[a-s]*`, `&*:x` refused).
+- MySQL: the system-schema check works under `NO_BACKSLASH_ESCAPES`.
+- The `pass` package itself refuses small-order public keys.
+- PostgreSQL: the isolation check also runs in readiness/`check-config -connect` and is repeated every 5 minutes; `endpoint.database` is required.
+- Gateway: concurrency cap; `identity.single_tenant_tokens`; documentation states that per-tenant session scoping, not Fetch Metadata, is the boundary against browser-driven pass collection.
+- Secret files are opened non-blocking (a FIFO cannot hang startup); Go toolchain pinned to 1.26.10.

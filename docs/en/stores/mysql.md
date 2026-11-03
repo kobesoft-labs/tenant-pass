@@ -82,7 +82,9 @@ Under the lock, tenant-pass refuses (audit `account_refused`) unless:
 - the managed role has no roles granted to it;
 - the server's `mandatory_roles` is empty (mandatory roles apply to every account and cannot be checked per account);
 - it is not tenant-pass's own account;
-- the replica's clock agrees with the server's `NOW(6)` within `rotation.max_clock_skew`.
+- the replica's clock agrees with the server's `UNIX_TIMESTAMP()` within `rotation.max_clock_skew`.
+
+**Connection exhaustion.** Limit tenants with `ALTER USER t_acme WITH MAX_USER_CONNECTIONS 20`, so that they cannot use all of `max_connections` and block rotation.
 
 Tenant accounts are expected to have privileges on their own databases or tables only (`GRANT … ON acme.* TO t_acme`).
 

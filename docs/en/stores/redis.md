@@ -21,7 +21,7 @@ Redis 7.0+ and Valkey 7.2+ (tenant-pass needs `ACL DRYRUN`). Tested with Redis 8
 
 ## ACLs are per server
 
-Redis does **not** replicate ACLs. Every server keeps its own users: a primary and its replicas, every Sentinel-managed instance, every Redis Cluster node. List **all** of them in the node's `servers`; tenant-pass reads every server, plans once, and writes the same password set to each. A server that lost its state (for example restarted without an aclfile) is brought back in line on the next request or sweep.
+Redis does **not** replicate ACLs. Every server keeps its own users: a primary and its replicas, every Sentinel-managed instance, every Redis Cluster node. List **all** of them in the node's `servers`; tenant-pass reads every server, plans once, and writes the same password set to each. A server that lost its passwords for a user (for example restarted with a stale aclfile) is brought back in line on the next request or sweep. A server on which the user no longer exists at all makes issuance refuse the user (tenant-pass never creates users): re-provision it there.
 
 If your servers load users from an `aclfile`, set `acl_save: true` so tenant-pass runs `ACL SAVE` after each change. Otherwise a restarted server comes back with stale passwords until tenant-pass fixes it.
 
@@ -51,12 +51,15 @@ Before issuing, on every server, tenant-pass refuses (audit `account_refused`) u
 - the user exists (tenant-pass never creates users) and carries the managed marker;
 - **`ACL DRYRUN`** reports that the user can run none of: `ACL …`, `CONFIG …`, `MODULE …`, `DEBUG`, `SHUTDOWN`, `FLUSHALL`, `FLUSHDB`, `SWAPDB`, `KEYS`, `CLIENT KILL/LIST/PAUSE`, `SCRIPT FLUSH`, `FUNCTION LOAD/DELETE/FLUSH`, `REPLICAOF`, `SLAVEOF`, `FAILOVER`, `CLUSTER …`, `SAVE`, `BGSAVE`, `BGREWRITEAOF`, `MONITOR`, `SYNC`, `PSYNC`, `SLOWLOG RESET`, `LATENCY RESET`, `MEMORY PURGE`, and the commands that see every key or channel name regardless of key patterns: `SCAN`, `RANDOMKEY`, `PUBSUB CHANNELS/SHARDCHANNELS`, `DBSIZE`, `OBJECT`;
 - **`ACL DRYRUN`** reports that the user cannot `GET`/`SET` random keys or `PUBLISH`/`SUBSCRIBE` to random channels, probed with names starting with many different characters, so that partial patterns such as `~[a-s]*` are caught too (that is, its key and channel patterns are restricted to its own prefix);
-- a static check of the rule text finds no `allcommands`, `allkeys`, `+@all`, `+@admin`, `+@dangerous`, or explicit grants of the commands above;
+- every key and channel pattern, in the root permissions and in every selector, starts with a **literal prefix** of at least two characters (no `*`, `?`, `[` or `\` in it): `~t:acme:*` and `&t:acme:*` are accepted; `~*`, `~*:secret`, `~[a-s]*`, `&*`, `allkeys` and `allchannels` are refused. A literal prefix is the only thing that keeps one tenant's pattern from matching other tenants' keys. Make sure no tenant's prefix is a prefix of another's (for example `t:acme:` and `t:acme2:`, not `t:a`);
+- a static check of the rule text finds no `allcommands`, `+@all`, `+@admin`, `+@dangerous`, or explicit grants of the commands above;
 - the server's `TIME` agrees with the replica's clock within `rotation.max_clock_skew`.
 
 `ACL DRYRUN` evaluates the user's *effective* permissions, including categories and selectors. This matters: categories such as `@slow` contain `ACL` and `CONFIG`. Grant tenants individual commands or narrow categories (`@read`, `@write`, `@string`, `@hash`, …).
 
-The sweeper only removes passwords. It sweeps **each server separately** (a user missing on one server, or one unreachable server, does not stop the others from being swept), and it never touches users without the marker or users that fail the static privilege check; it skips the more expensive `DRYRUN` probes.
+The sweeper only removes passwords. It sweeps **each server separately** (a user missing on one server, or one unreachable server, does not stop the others from being swept), and it never touches users without the marker or users that fail the static privilege check; it skips the more expensive `DRYRUN` probes. (A marked user whose administrative rights only `DRYRUN` detects — for example via `+@slow` — is refused by issuance, but the sweeper still removes its expired passwords. Do not put the marker on users that are not tenant accounts.)
+
+**Connection exhaustion.** Tenants share `maxclients`; keep headroom for the admin user, or run tenant-pass's admin connections against servers tenants cannot saturate.
 
 ## Node configuration
 

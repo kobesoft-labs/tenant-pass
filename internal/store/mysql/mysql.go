@@ -477,13 +477,14 @@ func (s *Store) privileged(ctx context.Context, conn *sql.Conn, user, host strin
 	// mysql.db.Db is a LIKE pattern (GRANT ... ON %.* or m_sql.* match
 	// the mysql schema), so the system schema names are tested against
 	// the pattern, not the other way round. The other tables hold exact
-	// names.
+	// names. CHAR(92) is a backslash in every sql_mode (a '\\' literal
+	// is two characters under NO_BACKSLASH_ESCAPES).
 	var dynamic, schemaGrants, proxies int
 	if err := conn.QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM mysql.global_grants WHERE USER = ? AND HOST = ?),
 		       (SELECT COUNT(*) FROM mysql.db WHERE User = ? AND Host = ? AND (
-		            'mysql' LIKE Db ESCAPE '\\' OR 'sys' LIKE Db ESCAPE '\\' OR
-		            'performance_schema' LIKE Db ESCAPE '\\' OR 'information_schema' LIKE Db ESCAPE '\\'))
+		            'mysql' LIKE Db ESCAPE CHAR(92) OR 'sys' LIKE Db ESCAPE CHAR(92) OR
+		            'performance_schema' LIKE Db ESCAPE CHAR(92) OR 'information_schema' LIKE Db ESCAPE CHAR(92)))
 		     + (SELECT COUNT(*) FROM mysql.tables_priv  WHERE User = ? AND Host = ? AND Db IN ('mysql', 'sys', 'performance_schema'))
 		     + (SELECT COUNT(*) FROM mysql.columns_priv WHERE User = ? AND Host = ? AND Db IN ('mysql', 'sys', 'performance_schema'))
 		     + (SELECT COUNT(*) FROM mysql.procs_priv   WHERE User = ? AND Host = ? AND Db IN ('mysql', 'sys', 'performance_schema')),

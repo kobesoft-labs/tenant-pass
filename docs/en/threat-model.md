@@ -76,7 +76,7 @@ A trusted issuer can sign tickets for any tenant and any application that has `j
 
 ### Session token replay by a compromised application
 
-Behind tenant-pass-gateway, the application may receive the user's session cookie or token like any web application. A compromised application could then try to obtain passes for every tenant in that user's tenant claim, until the token expires — by replaying the token, or by making the user's browser request the other tenants' hosts. tenant-pass-gateway counters both: `forward_claims` lets the proxy strip the token before it reaches the application, caller authentication blocks direct calls, and Fetch Metadata enforcement stops browser-triggered requests to sibling hosts from carrying a cookie session. What remains is bounded by the user's own tenants and needs user interaction (one click per tenant). See [gateway.md](gateway.md#cookie-sessions-and-fetch-metadata).
+Behind tenant-pass-gateway, the application may receive the user's session cookie or token like any web application. A compromised application could then try to obtain passes for every tenant in that user's tenant claim, until the token expires — by replaying the token, or by making the user's browser request the other tenants' hosts. tenant-pass-gateway counters replay with `forward_claims` (the proxy strips the token before it reaches the application) and caller authentication (no direct calls). The browser path is closed only by **scoping sessions per tenant**: host-only session cookies and `identity.single_tenant_tokens`. Fetch Metadata enforcement blocks passive cross-host requests but is not a boundary against a compromised application that serves the other tenants' pages too. Without session scoping, exposure is bounded by the tenants in the user's own tenant claim while the session is valid. See [gateway.md](gateway.md#cookie-sessions-across-tenant-hosts).
 
 ### Compromised identity provider
 
@@ -126,6 +126,8 @@ tenant-pass is not designed to be exposed to the internet. Put it on an internal
 - Protecting a tenant from a compromised application **while that tenant is being served** by it.
 - Hiding which tenants exist from authenticated applications (`denied` does not distinguish "no such tenant" from "not allowed", but timing may).
 - Detecting grants on **another tenant's** objects (for example a table-level grant from tenant A's schema to tenant B's role). Isolation between tenants' objects is set up by your provisioning; tenant-pass refuses administrative and server-wide privileges, not every possible cross-tenant grant.
+- Protecting against connection exhaustion of a shared database server by tenants (reserve connections for the admin role; see the store guides).
+- Detecting two directory entries (SQL directory) or two node names pointing at the same account; the static directory refuses shared accounts, the SQL directory relies on your schema.
 - Closing database sessions that are already open when a credential expires or an application is revoked (see [operations.md](operations.md#incident-response)).
 - Protecting against a tenant account's own actions inside its store. For example, a PostgreSQL role can change its own password; that only locks out its own tenant until the next window or a `repair`.
 - Replacing database-level authorization. Tenant accounts should have only the privileges the tenant's data needs (for example, ownership of one schema or database).

@@ -86,13 +86,18 @@ type Config struct {
 
 // Store implements store.Store for PostgreSQL.
 type Store struct {
-	cfg      Config
-	sched    *rotation.Schedule
-	pool     *pgxpool.Pool
-	locks    keyedmutex.Map
-	now      func() time.Time
-	isolated atomic.Bool // checkIsolation succeeded once
+	cfg        Config
+	sched      *rotation.Schedule
+	pool       *pgxpool.Pool
+	locks      keyedmutex.Map
+	now        func() time.Time
+	isolatedAt atomic.Int64 // unix nanos of the last successful checkIsolation
 }
+
+// isolationRecheck is how long a successful isolation check is trusted.
+// Privileges can change after startup (a later GRANT CONNECT would
+// re-open the advisory lock attack), so the check is repeated.
+const isolationRecheck = 5 * time.Minute
 
 // MinServerVersion is the oldest supported PostgreSQL (16). Before 16, a
 // role may grant membership in itself to others, so a tenant could make
@@ -107,7 +112,7 @@ const MinServerVersion = 160000
 // its password expires. So the admin connection must use a database that
 // neither PUBLIC nor any managed role may connect to.
 func (s *Store) checkIsolation(ctx context.Context) error {
-	if s.isolated.Load() {
+	if last := s.isolatedAt.Load(); last != 0 && time.Since(time.Unix(0, last)) < isolationRecheck {
 		return nil
 	}
 	var version int
@@ -133,7 +138,7 @@ func (s *Store) checkIsolation(ctx context.Context) error {
 		return fmt.Errorf("postgres %s: database %q is connectable by PUBLIC or by managed roles; "+
 			"use a dedicated database for tenant-pass (REVOKE CONNECT ON DATABASE ... FROM PUBLIC)", s.cfg.Name, db)
 	}
-	s.isolated.Store(true)
+	s.isolatedAt.Store(time.Now().UnixNano())
 	return nil
 }
 
@@ -212,7 +217,14 @@ func (s *Store) Type() string { return Type }
 func (s *Store) Close() { s.pool.Close() }
 
 // Ping implements store.Store.
-func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
+// It also runs the isolation check, so check-config -connect and /readyz
+// report a database that tenants can connect to.
+func (s *Store) Ping(ctx context.Context) error {
+	if err := s.pool.Ping(ctx); err != nil {
+		return err
+	}
+	return s.checkIsolation(ctx)
+}
 
 // Sweep implements store.Store. PostgreSQL enforces expiry itself.
 func (s *Store) Sweep(context.Context) error { return nil }

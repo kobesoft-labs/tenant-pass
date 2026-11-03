@@ -47,7 +47,11 @@ type File struct {
 	// The forward-auth listener treats every path as an authorization
 	// request (Envoy appends the original path), so it has no health path.
 	HealthListen string `json:"health_listen"`
-	LogLevel     string `json:"log_level"`
+	// MaxConcurrentRequests bounds in-flight authorization requests
+	// (each may cost an asymmetric signature verification and a
+	// signature); excess requests get 503. Default 256.
+	MaxConcurrentRequests int    `json:"max_concurrent_requests"`
+	LogLevel              string `json:"log_level"`
 }
 
 // PassSettings controls the passes the gateway signs.
@@ -111,6 +115,11 @@ type IdentitySettings struct {
 	// user activated (a click: Sec-Fetch-Mode: navigate, Sec-Fetch-User:
 	// ?1). Requests without Fetch Metadata headers get no pass.
 	CookieFetchMetadata string `json:"cookie_fetch_metadata"`
+	// SingleTenantTokens requires the tenant claim to name exactly one
+	// tenant. Combined with host-only session cookies (one session per
+	// tenant host), a session can then never yield a pass for any other
+	// tenant, whatever a compromised application makes the browser do.
+	SingleTenantTokens bool `json:"single_tenant_tokens"`
 }
 
 // Route maps request hosts to the application that serves them.
@@ -171,6 +180,9 @@ func LoadFile(path string) (*File, error) {
 	if f.Identity.Leeway == nil {
 		d := config.Duration(30 * time.Second)
 		f.Identity.Leeway = &d
+	}
+	if f.MaxConcurrentRequests == 0 {
+		f.MaxConcurrentRequests = 256
 	}
 	if f.Identity.CookieFetchMetadata == "" {
 		f.Identity.CookieFetchMetadata = "enforce"
@@ -289,6 +301,9 @@ func (f *File) validate() ([]route, error) {
 		fail("identity.max_token_age must not be negative")
 	}
 
+	if f.MaxConcurrentRequests < 1 {
+		fail("max_concurrent_requests must be positive")
+	}
 	switch f.Identity.CookieFetchMetadata {
 	case "enforce", "off":
 	default:

@@ -73,7 +73,9 @@ Under the advisory lock, before any change, tenant-pass reads `pg_roles` / `pg_a
 - neither it nor any role it is a member of holds `ADMIN OPTION` on any role;
 - it is neither `managed_group` itself nor tenant-pass's own login role.
 
-It also compares its clock with the server's `clock_timestamp()` and refuses to write when they differ by more than `rotation.max_clock_skew`, and it refuses to work at all unless the server is PostgreSQL 16+ and the admin connection's database cannot be connected to by PUBLIC or by any managed role.
+It also compares its clock with the server's `clock_timestamp()` and refuses to write when they differ by more than `rotation.max_clock_skew`, and it refuses to work at all unless the server is PostgreSQL 16+ and the admin connection's database cannot be connected to by PUBLIC or by any managed role. The isolation check runs at readiness/`check-config -connect` and is repeated at least every 5 minutes, so a later `GRANT CONNECT` is noticed.
+
+**Connection exhaustion.** Tenants share the server's `max_connections`. If tenants can use them all, tenant-pass cannot rotate passwords and every tenant's password eventually expires. Set per-role limits (`ALTER ROLE t_acme CONNECTION LIMIT 20`) and reserve connections for the admin: `reserved_connections = 5` and `GRANT pg_use_reserved_connections TO tenant_pass_admin` (PostgreSQL 16+).
 
 Grant tenant roles privileges on their own objects (or through NOLOGIN group roles without special attributes); anything broader is refused.
 

@@ -115,7 +115,7 @@ curl -s https://tenant-pass.internal:8443/v1/credentials \
   "tenant": "acme", "store": "postgres",
   "host": "pgbouncer.internal", "port": 6432, "database": "app",
   "username": "t_acme", "password": "lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE",
-  "expires_at": "2026-11-03T12:13:59Z", "refresh_at": "2026-11-03T12:08:59Z"
+  "expires_at": "2026-11-03T12:08:59Z", "refresh_at": "2026-11-03T12:03:59Z"
 }
 ```
 

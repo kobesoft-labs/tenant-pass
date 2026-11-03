@@ -24,8 +24,10 @@ services:
     stop_grace_period: 20s
     volumes:
       - ./config.json:/etc/tenant-pass/config.json:ro
-    secrets: [tenant-pass.key, rotation-2026-11, pg1-admin-password]
+    secrets: [tenant-pass.key, rotation-2026-11.key, pg1-admin-password]
 ```
+
+シークレットファイルと信頼に関わるファイルは、root またはコンテナを実行するユーザー（イメージは uid 65532 で実行されます）が所有し、グループやその他のユーザーが書き込めないものでなければなりません。Docker と Kubernetes のシークレットのマウントは、デフォルトで root が所有します。
 
 ## 初期構築
 
@@ -101,7 +103,9 @@ cosign verify ghcr.io/kobesoft-labs/tenant-pass:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-タグではなくダイジェスト（`ghcr.io/…@sha256:…`）でデプロイしてください。
+`ghcr.io/kobesoft-labs/tenant-pass-gateway` についても同様です。タグではなくダイジェスト（`ghcr.io/…@sha256:…`）でデプロイしてください。
+
+メンテナー向け: 最初のリリースの後に GHCR のパッケージを公開に設定し、`v*` タグをリポジトリのルールセットで保護してください（署名の ID は、このリポジトリにプッシュされた `v*` に一致するタグを信頼します）。
 
 ## アップグレード
 

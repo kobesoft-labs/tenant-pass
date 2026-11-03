@@ -101,7 +101,7 @@ func setup(t *testing.T, mutate func(*File)) *fixture {
 			{Host: "shop.acme-corp.com", App: "billing", Tenant: "acme"},
 			{Host: "app.example.com", App: "crm", TenantFromToken: true},
 		},
-		Unauthenticated: "pass_through", LogLevel: "debug",
+		Unauthenticated: "pass_through", LogLevel: "debug", MaxConcurrentRequests: 64,
 	}
 	if mutate != nil {
 		mutate(f)
@@ -585,5 +585,25 @@ func TestCallerCertCheck(t *testing.T) {
 	}
 	if err := check(tls.ConnectionState{}); err == nil {
 		t.Error("no certificate accepted")
+	}
+}
+
+func TestSingleTenantTokens(t *testing.T) {
+	fx := setup(t, func(f *File) { f.Identity.SingleTenantTokens = true })
+	if w := fx.call("acme.billing.example.com", fx.idp.userToken(t, "acme"), ""); w.Header().Get("Tenant-Pass") == "" {
+		t.Fatal("single-tenant token refused")
+	}
+	if w := fx.call("acme.billing.example.com", fx.idp.userToken(t, []any{"acme", "beta"}), ""); w.Code != 403 || w.Header().Get("Tenant-Pass") != "" {
+		t.Fatalf("multi-tenant token accepted: %d", w.Code)
+	}
+}
+
+func TestGatewayConcurrencyCap(t *testing.T) {
+	fx := setup(t, nil)
+	for range cap(fx.g.inflight) {
+		fx.g.inflight <- struct{}{}
+	}
+	if w := fx.call("acme.billing.example.com", fx.idp.userToken(t, "acme"), ""); w.Code != 503 || w.Header().Get("Tenant-Pass") != "" {
+		t.Fatalf("over capacity: %d", w.Code)
 	}
 }

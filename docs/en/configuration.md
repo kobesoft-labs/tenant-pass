@@ -7,7 +7,8 @@ tenant-pass reads one JSON file (`-config`). A complete example is [examples/con
 ## Rules
 
 - **Strict parsing.** Unknown keys, duplicate keys and trailing data are errors. A typo cannot silently disable a setting.
-- **No secrets in the file.** Every secret is a path to a separate file (`*_file`). Secret files must be regular files, not writable by group or others; a warning is logged if they are readable by group or others. A single trailing newline is removed.
+- **No secrets in the file.** Every secret is a path to a separate file (`*_file`). Secret files must be regular files, not writable by group or others, and **owned by the user tenant-pass runs as or by root** (another user could rewrite their own file regardless of its mode); a warning is logged if they are readable by group or others. A single trailing newline is removed.
+- **Trust files too.** Public keys, CA bundles, certificates, JWKS files and the configuration file itself decide what is trusted, so they get the same integrity checks (mode and owner), without the readability warning.
 - **Validated at startup.** Everything is checked before the server starts; any error stops startup, and all errors are reported together. `tenant-pass check-config -config FILE` runs the same checks, and `-connect` also connects to the directory and every node.
 - **The config file itself** must not be writable by group or others.
 - **Durations** are Go duration strings: `"30s"`, `"15m"`, `"1h"`.
@@ -109,6 +110,8 @@ Runs your queries against a PostgreSQL or MySQL database that already knows your
 | `by_host` | Query for passes with `host`. Parameters: `$1`/`?` = host name, `$2`/`?` = application name. |
 | `by_tenant` | Query for passes with `tenant`. Parameters: tenant ID, application name. |
 
+The directory must map each account to at most one tenant (tenant-pass cannot detect two rows, or two node names for the same server, pointing at one account).
+
 Each query must return **exactly** the columns `tenant_id`, `node`, `account`, `enabled` (in this order, with these names — use `AS`), and zero or one row. More than one row is an error (fail closed). Queries run inside a **read-only transaction**. Both queries are run once at startup with a dummy key to check that they parse and return the right columns.
 
 Restricting tenants to applications is the query's job, via the second parameter. If every application may access every tenant, say so explicitly, for example `AND $2::text IS NOT NULL`.
@@ -163,7 +166,7 @@ Used by `directory.sql.endpoint`, `nodes[].endpoint` and `nodes[].servers[]`. te
 | `address` | `host:port`. |
 | `user` | Login name. |
 | `password_file` | File containing the password. |
-| `database` | Database name (PostgreSQL directory/node, MySQL directory). |
+| `database` | Database name. **Required for PostgreSQL nodes**: tenant-pass's own database, which neither PUBLIC nor any managed role may connect to (see [PostgreSQL](stores/postgres.md)). Also used by the PostgreSQL/MySQL directory. |
 | `tls.ca_file` | CA bundle to verify the server. Default: system roots. |
 | `tls.server_name` | Name checked against the server certificate. Default: the host in `address`. |
 | `tls.cert_file`, `tls.key_file` | Client certificate for the connection (optional). |

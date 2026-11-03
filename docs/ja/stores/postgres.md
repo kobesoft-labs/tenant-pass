@@ -73,7 +73,9 @@ GRANT t_acme TO tenant_pass_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
 - そのロール自身も、それがメンバーとなっているどのロールも、いかなるロールに対しても `ADMIN OPTION` を持たない。
 - `managed_group` そのものでも、tenant-pass 自身のログインロールでもない。
 
-また、自身の時計をサーバーの `clock_timestamp()` と比較し、差が `rotation.max_clock_skew` を超える場合は書き込みを拒否します。さらに、サーバーが PostgreSQL 16 以降であり、かつ管理者接続のデータベースに PUBLIC もどの管理対象ロールも接続できない場合を除き、一切の処理を拒否します。
+また、自身の時計をサーバーの `clock_timestamp()` と比較し、差が `rotation.max_clock_skew` を超える場合は書き込みを拒否します。さらに、サーバーが PostgreSQL 16 以降であり、かつ管理者接続のデータベースに PUBLIC もどの管理対象ロールも接続できない場合を除き、一切の処理を拒否します。この分離のチェックはレディネスの確認時と `check-config -connect` の実行時に行われ、少なくとも 5 分ごとに繰り返されるため、後から行われた `GRANT CONNECT` にも気付きます。
+
+**接続の枯渇。** テナントはサーバーの `max_connections` を共有します。テナントがそれをすべて使い切れると、tenant-pass はパスワードをローテーションできず、やがてすべてのテナントのパスワードが失効します。ロールごとの上限（`ALTER ROLE t_acme CONNECTION LIMIT 20`）を設定し、管理者用に接続を予約してください: `reserved_connections = 5` と `GRANT pg_use_reserved_connections TO tenant_pass_admin`（PostgreSQL 16 以降）。
 
 テナントロールには、自身のオブジェクトに対する権限を（または特別な属性を持たない NOLOGIN のグループロールを通じて）付与してください。それより広いものは拒否されます。
 

@@ -494,6 +494,44 @@ type aclUser struct {
 	passwords []string
 	commands  []string // root commands field plus each selector's
 	channels  string   // root channels field
+	patterns  []string // key and channel patterns of root and selectors
+}
+
+// minLiteralPrefix is the shortest literal prefix a key or channel
+// pattern must start with.
+const minLiteralPrefix = 2
+
+// patternProblem returns a reason if a key or channel rule is not scoped
+// to a literal prefix. Accepted: "~t:acme:*", "%R~t:acme:*", "&t:acme:*",
+// "resetkeys"/"resetchannels". Refused: "~*", "~*:secret", "~[a-s]*",
+// "allkeys", "&*", and anything whose first two characters include a glob
+// metacharacter. A literal prefix is the only thing that keeps one
+// tenant's pattern from matching other tenants' keys; probing with random
+// names cannot cover every possible glob.
+func patternProblem(rule string) string {
+	r := rule
+	switch {
+	case r == "" || r == "resetkeys" || r == "resetchannels":
+		return ""
+	case r == "allkeys" || r == "allchannels":
+		return "unrestricted " + r
+	case strings.HasPrefix(r, "&"):
+		r = r[1:]
+	case strings.HasPrefix(r, "~"):
+		r = r[1:]
+	case strings.HasPrefix(r, "%"):
+		_, after, ok := strings.Cut(r, "~")
+		if !ok {
+			return "unrecognized key rule " + rule
+		}
+		r = after
+	default:
+		return "unrecognized key or channel rule " + rule
+	}
+	if i := strings.IndexAny(r, "*?[\\"); i >= 0 && i < minLiteralPrefix || len(r) < minLiteralPrefix {
+		return "key or channel pattern " + rule + " has no literal prefix"
+	}
+	return ""
 }
 
 // dangerousRules lists explicitly granted rules that are refused by the
@@ -510,6 +548,7 @@ var dangerousRules = map[string][]string{
 	"keys": nil, "sentinel": nil, "pfdebug": nil, "slowlog": nil, "latency": nil,
 	"scan": nil, "randomkey": nil, "dbsize": nil,
 	"pubsub":   {"channels", "shardchannels", "numpat"},
+	"object":   nil,
 	"client":   {"kill", "list", "pause", "unpause", "no-evict", "no-touch"},
 	"function": {"load", "delete", "flush", "restore"},
 	"script":   {"flush", "kill"},
@@ -524,6 +563,14 @@ func (u aclUser) privileged() string {
 	}
 	if slices.Contains(u.flags, "allkeys") {
 		return "allkeys"
+	}
+	if slices.Contains(u.flags, "allchannels") {
+		return "allchannels"
+	}
+	for _, p := range u.patterns {
+		if reason := patternProblem(p); reason != "" {
+			return reason
+		}
 	}
 	for _, rules := range u.commands {
 		for _, r := range strings.Fields(strings.ToLower(rules)) {
@@ -579,6 +626,12 @@ func parseUser(raw any) (aclUser, error) {
 	if u.channels, ok = m["channels"].(string); !ok {
 		return aclUser{}, errors.New("unexpected ACL GETUSER reply (channels)")
 	}
+	keys, ok := m["keys"].(string)
+	if !ok {
+		return aclUser{}, errors.New("unexpected ACL GETUSER reply (keys)")
+	}
+	u.patterns = append(u.patterns, strings.Fields(keys)...)
+	u.patterns = append(u.patterns, strings.Fields(u.channels)...)
 	if selRaw, present := m["selectors"]; present {
 		sels, ok := selRaw.([]any)
 		if !ok {
@@ -594,6 +647,13 @@ func parseUser(raw any) (aclUser, error) {
 				return aclUser{}, errors.New("unexpected ACL GETUSER reply (selector commands)")
 			}
 			u.commands = append(u.commands, c)
+			sk, ok1 := sm["keys"].(string)
+			sc, ok2 := sm["channels"].(string)
+			if !ok1 || !ok2 {
+				return aclUser{}, errors.New("unexpected ACL GETUSER reply (selector keys/channels)")
+			}
+			u.patterns = append(u.patterns, strings.Fields(sk)...)
+			u.patterns = append(u.patterns, strings.Fields(sc)...)
 		}
 	}
 	return u, nil

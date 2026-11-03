@@ -43,8 +43,8 @@ Content-Type: application/json
   "database": "app",
   "username": "t_acme",
   "password": "lRG6msAkg88kIIjJU-N6yWZ6wzx1gQj62GYG71hcgjE",
-  "expires_at": "2026-11-03T12:13:59Z",
-  "refresh_at": "2026-11-03T12:08:59Z"
+  "expires_at": "2026-11-03T12:08:59Z",
+  "refresh_at": "2026-11-03T12:03:59Z"
 }
 ```
 
@@ -70,7 +70,7 @@ Content-Type: application/json
 | 400 | `invalid_pass` | パスが拒否された: 形式不正、未知の鍵、不正な署名、不正なクレーム、期限切れ、または `aud` が呼び出し元のアプリケーションではない。 |
 | 400 | `invalid_ticket` | ジョブチケットが拒否された。理由はパスの場合と同じ。 |
 | 401 | `unauthorized` | アプリケーションの認証に失敗した。`WWW-Authenticate: Bearer realm="tenant-pass"` が付きます。 |
-| 403 | `denied` | そのようなテナントが存在しない、アプリケーションがそのテナントに対して許可されていない、テナントが無効化されている、ストアがアカウントを拒否した、または（チケットの場合）アプリケーションに対してジョブチケットが有効になっていない。 |
+| 403 | `denied` | そのようなテナントが存在しない、アプリケーションがそのテナントに対して許可されていない、テナントが無効化されている、ストアがアカウントを拒否した、または（チケットの場合）アプリケーションに対してジョブチケットが有効になっていない、発行者が許可されていない、もしくはそのパスがすでにチケットと交換されている。 |
 | 404 | `not_found` | 未知のパス。 |
 | 405 | `method_not_allowed` | `POST` ではない。 |
 | 413 | `request_too_large` | ボディが 4096 バイトを超えている。 |
@@ -125,19 +125,20 @@ Content-Type: application/json
 tenant-pass は、リクエストごとに 1 行の JSON を標準出力に書き出します。`/v1/credentials` では `"msg":"credential"`、`/v1/job-tickets` では `"msg":"job_ticket"` です。
 
 ```json
-{"time":"2026-11-03T12:00:01Z","level":"INFO","msg":"credential","request_id":"43f007226bb0e766","app":"billing","repair":false,"jti":"hamSSKegCc-kk82SdW2dpw","host":"acme.example.com","tenant":"acme","node":"pg1","account":"t_acme","store":"postgres","window":1993007,"key_id":"k1","changed":true,"expires_at":"2026-11-03T12:13:59Z","result":"ok","duration_ms":7}
+{"time":"2026-11-03T12:00:01Z","level":"INFO","msg":"credential","request_id":"43f007226bb0e766","app":"billing","repair":false,"jti":"hamSSKegCc-kk82SdW2dpw","host":"acme.example.com","tenant":"acme","node":"pg1","account":"t_acme","store":"postgres","window":1993007,"key_id":"k1","changed":true,"expires_at":"2026-11-03T12:08:59Z","result":"ok","duration_ms":7}
 ```
 
 | フィールド | 意味 |
 | --- | --- |
+| `request_id` | このリクエストのランダムな ID。 |
 | `via` | `pass` または `ticket`。 |
 | `issuer` | チケットの場合: それに署名した鍵 ID。 |
 | `result` | `ok`、またはクライアントに返したエラーコード。 |
-| `reason` | 失敗した理由: `app_auth`、`body_size`、`body_json`、`content_type`、`pass_malformed`、`pass_unknown_key`、`pass_signature`、`pass_claims`、`pass_expired`、`pass_audience`、`distinct_tenants`、`distinct_tenants_jobs`、`pass_or_ticket`、`jobs_not_enabled`、`job_issue_not_enabled`、`issuer_not_allowed`、`ticket_lifetime`、`pass_already_used`、`ticket_*`（`pass_*` と同様）、`ttl`、`sign_error`、`tenant_not_found`、`tenant_disabled`、`directory_error`、`directory_mismatch`、`unknown_node`、`account_refused`、`clock_skew`、`timeout`、`store_error`、`max_concurrent_requests`。 |
+| `reason` | 失敗した理由: `app_auth`、`body_size`、`body_json`、`content_type`、`pass_malformed`、`pass_unknown_key`、`pass_signature`、`pass_claims`、`pass_expired`、`pass_audience`、`distinct_tenants`、`distinct_tenants_jobs`、`pass_or_ticket`、`jobs_not_enabled`、`job_issue_not_enabled`、`issuer_not_allowed`、`ticket_lifetime`、`pass_already_used`、`ticket_*`（`pass_*` と同様）、`ttl`、`sign_error`、`pass_already_used`、`body_read`、`method`、`path`、`tenant_not_found`、`tenant_disabled`、`directory_error`、`directory_mismatch`、`unknown_node`、`account_refused`、`clock_skew`、`timeout`、`store_error`、`max_concurrent_requests`。 |
 | `error` | `directory_error` / `store_error` / `account_refused` などの場合のエラーの分類（SQLSTATE、MySQL のエラー番号、Redis のエラープレフィックス、拒否理由）。サーバーのエラーメッセージはコピーされません。データベースサーバー以外に由来するエラー（ネットワーク、TLS、タイムアウト）はそのテキストごと記録され、ホスト名や管理ユーザー名を含むことがありますが、パスワードや鍵は決して含みません。 |
 | `changed` | ストアが変更されたかどうか。 |
 | `window`、`key_id` | 認証情報がどのウィンドウとどのローテーション鍵に属するか。 |
 
 ログに決して記録されないもの: パスワード、ベリファイア、ハッシュ、パス、ジョブチケット、アプリトークン、ローテーション鍵。クライアントの IP アドレスは tenant-pass では記録しません。必要であればロードバランサーから取得してください。
 
-レベル: 成功時は `INFO`、クライアントエラーは `WARN`、`directory_error`、`store_error`、`account_refused`、`clock_skew`、`unknown_node`、`directory_mismatch` は `ERROR` です。何をアラート対象にすべきかについては [operations.md](operations.md#監視) を参照してください。
+レベル: 成功時は `INFO`、クライアントエラーは `WARN`、`directory_error`、`store_error`、`account_refused`、`clock_skew`、`timeout`、`unknown_node`、`directory_mismatch`、`sign_error` は `ERROR` です。何をアラート対象にすべきかについては [operations.md](operations.md#監視) を参照してください。

@@ -56,6 +56,7 @@ type Gateway struct {
 	callerSecret []byte
 	logger       *slog.Logger
 	now          func() time.Time
+	inflight     chan struct{}
 }
 
 // New builds a Gateway. keys and signer are created by the caller.
@@ -64,7 +65,8 @@ func New(f *File, keys *keySet, signer pass.Signer, logger *slog.Logger) (*Gatew
 	if err != nil {
 		return nil, err
 	}
-	g := &Gateway{f: f, routes: routes, keys: keys, signer: signer, logger: logger, now: time.Now}
+	g := &Gateway{f: f, routes: routes, keys: keys, signer: signer, logger: logger, now: time.Now,
+		inflight: make(chan struct{}, max(f.MaxConcurrentRequests, 1))}
 	for _, a := range f.Identity.Algorithms {
 		g.algs = append(g.algs, jose.SignatureAlgorithm(a))
 	}
@@ -330,6 +332,15 @@ func (g *Gateway) auth(w http.ResponseWriter, r *http.Request) {
 		g.logger.Log(r.Context(), level, "gateway", append(attrs, "result", result, "reason", reason)...)
 	}
 
+	select {
+	case g.inflight <- struct{}{}:
+		defer func() { <-g.inflight }()
+	default:
+		log(slog.LevelWarn, "busy", "max_concurrent_requests")
+		g.respond(w, http.StatusServiceUnavailable, "busy")
+		return
+	}
+
 	if g.callerSecret != nil {
 		got := []byte(r.Header.Get(CallerSecretHdr))
 		if subtle.ConstantTimeCompare(got, g.callerSecret) != 1 {
@@ -384,6 +395,11 @@ func (g *Gateway) auth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if g.f.Identity.SingleTenantTokens && len(tenants) != 1 {
+		log(slog.LevelWarn, "forbidden", "token_names_several_tenants")
+		g.respond(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	tenant := hostTenant
 	if rt.TenantFromToken {
 		if len(tenants) != 1 {

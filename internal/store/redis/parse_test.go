@@ -39,6 +39,25 @@ func TestPrivileged(t *testing.T) {
 	}
 }
 
+func TestPatternProblem(t *testing.T) {
+	ok := []string{"~t:acme:*", "%R~t:acme:*", "%RW~t:acme:*", "&t:acme:*", "~t:acme:key", "resetkeys", "resetchannels"}
+	bad := []string{"~*", "~*:secret", "~*y*", "~[a-s]*", "~?x", "&*", "&*:events", "%R~*", "allkeys", "allchannels", "~t", "~t*", "~\\*", "bogus"}
+	for _, p := range ok {
+		if r := patternProblem(p); r != "" {
+			t.Errorf("%q refused: %s", p, r)
+		}
+	}
+	for _, p := range bad {
+		if patternProblem(p) == "" {
+			t.Errorf("%q accepted", p)
+		}
+	}
+	u := aclUser{patterns: []string{"~t:acme:*", "~*:secret"}}
+	if u.privileged() == "" {
+		t.Error("wildcard pattern in user not refused")
+	}
+}
+
 func TestMarker(t *testing.T) {
 	u := aclUser{channels: "&t:acme:* &tenant-pass:managed"}
 	if !u.hasMarker("tenant-pass:managed") {
@@ -58,7 +77,7 @@ func TestParseUserRESP2(t *testing.T) {
 		"commands", "-@all +get",
 		"keys", "~t:*",
 		"channels", "&tenant-pass:managed",
-		"selectors", []any{[]any{"commands", "+@all", "keys", "~x", "channels", ""}},
+		"selectors", []any{[]any{"commands", "+@all", "keys", "~xy", "channels", ""}},
 	}
 	u, err := parseUser(raw)
 	if err != nil {
@@ -74,7 +93,8 @@ func TestParseUserRESP2(t *testing.T) {
 		"no channels":     {"flags", []any{}, "passwords", []any{}, "commands", ""},
 		"commands array":  {"flags", []any{}, "passwords", []any{}, "commands", []any{"+@all"}, "channels", ""},
 		"duplicate key":   {"flags", []any{}, "passwords", []any{}, "commands", "", "commands", "+@all", "channels", ""},
-		"bad selector":    {"flags", []any{}, "passwords", []any{}, "commands", "", "channels", "", "selectors", []any{[]any{"keys", "~*"}}},
+		"bad selector":    {"flags", []any{}, "passwords", []any{}, "commands", "", "keys", "", "channels", "", "selectors", []any{[]any{"keys", "~*"}}},
+		"no keys":         {"flags", []any{}, "passwords", []any{}, "commands", "", "channels", ""},
 		"non-string pass": {"flags", []any{}, "passwords", []any{int64(1)}, "commands", "", "channels", ""},
 	}
 	for name, r := range bad {

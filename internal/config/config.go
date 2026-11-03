@@ -451,7 +451,7 @@ func Resolve(f *File, now time.Time) (*Resolved, error) {
 		}
 		r.GatewayKeys[k.ID] = pk
 	}
-	if f.Pass.MaxTTL <= 0 || time.Duration(f.Pass.MaxTTL) > pass.HardMaxTTL {
+	if time.Duration(f.Pass.MaxTTL) < time.Second || time.Duration(f.Pass.MaxTTL) > pass.HardMaxTTL {
 		fail("pass.max_ttl must be between 1s and %s", pass.HardMaxTTL)
 	}
 	if *f.Pass.Leeway < 0 || time.Duration(*f.Pass.Leeway) > 30*time.Second {
@@ -796,6 +796,9 @@ func resolveNode(n NodeFile, allowPlain bool) (ResolvedNode, error) {
 
 	switch n.Type {
 	case "postgres":
+		if n.Endpoint.Database == "" {
+			return rn, errors.New(`endpoint.database is required: tenant-pass's own database, which tenants cannot connect to (for example "tenant_pass")`)
+		}
 		if n.ManagedGroup == "" {
 			return rn, errors.New("managed_group is required")
 		}
