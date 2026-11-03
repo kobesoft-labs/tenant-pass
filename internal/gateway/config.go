@@ -89,6 +89,13 @@ type IdentitySettings struct {
 	// reject tokens issued for other purposes or other clients whose
 	// audience happens to overlap.
 	RequiredClaims map[string]string `json:"required_claims"`
+	// ForwardClaims maps response header names to string claims of the
+	// verified token, for example {"Tenant-Pass-User": "sub"}. The proxy
+	// copies them onto the forwarded request, so the application learns
+	// who the user is WITHOUT receiving the session token itself, and the
+	// proxy can strip the token. An application that never sees session
+	// tokens cannot replay them to obtain passes.
+	ForwardClaims map[string]string `json:"forward_claims"`
 }
 
 // Route maps request hosts to the application that serves them.
@@ -190,6 +197,15 @@ func (f *File) validate() ([]route, error) {
 	} else if f.TLS.CertFile == "" || f.TLS.KeyFile == "" {
 		fail("tls.cert_file and tls.key_file are required (or insecure_plaintext_http on loopback)")
 	}
+	// Callers must be authenticated unless the gateway is reachable only
+	// from the same host. Otherwise an application on the network could
+	// call the gateway directly with a session token it has seen and any
+	// X-Forwarded-Host it likes.
+	if lh, _, err := net.SplitHostPort(f.Listen); err != nil {
+		fail("listen %q must be host:port", f.Listen)
+	} else if ip := net.ParseIP(lh); (ip == nil || !ip.IsLoopback()) && f.CallerSecretFile == "" && f.TLS.ClientCAFile == "" {
+		fail("callers must be authenticated when listening on a non-loopback address: set caller_secret_file or tls.client_ca_file")
+	}
 	if f.CallerSecretFile != "" {
 		if v, err := secret.ReadFile(f.CallerSecretFile); err != nil {
 			fail("caller_secret_file: %v", err)
@@ -236,6 +252,16 @@ func (f *File) validate() ([]route, error) {
 	}
 	if id.Leeway < 0 || time.Duration(id.Leeway) > 5*time.Minute {
 		fail("identity.leeway must be between 0 and 5m")
+	}
+	for hdr, claim := range id.ForwardClaims {
+		switch strings.ToLower(hdr) {
+		case "authorization", "cookie", "host", "content-length", "transfer-encoding", "connection",
+			strings.ToLower(f.Pass.Header), strings.ToLower(CallerSecretHdr):
+			fail("identity.forward_claims: header %q is not allowed", hdr)
+		}
+		if !headerName.MatchString(hdr) || !claimPath.MatchString(claim) {
+			fail("identity.forward_claims: invalid entry %q: %q", hdr, claim)
+		}
 	}
 	for name := range id.RequiredClaims {
 		if !claimPath.MatchString(name) || strings.Contains(name, ".") {

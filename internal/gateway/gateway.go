@@ -166,59 +166,106 @@ func (g *Gateway) token(r *http.Request) string {
 
 var errNoToken = errors.New("no token")
 
-// verify checks the session token and returns the tenants it names.
-func (g *Gateway) verify(ctx context.Context, raw string) ([]string, error) {
+// verify checks the session token and returns the tenants it names and
+// the identity headers to forward.
+func (g *Gateway) verify(ctx context.Context, raw string) ([]string, map[string]string, error) {
+	tenants, custom, err := g.verifyToken(ctx, raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	fwd := map[string]string{}
+	for hdr, path := range g.f.Identity.ForwardClaims {
+		v, ok := claimAt(custom, path).(string)
+		if !ok || !safeHeaderValue(v) {
+			// A configured identity claim that is missing or unusable
+			// makes the token unusable: forwarding a request without it
+			// could let a client-supplied header of that name through.
+			return nil, nil, errors.New("forward claim " + path + " missing or invalid")
+		}
+		fwd[hdr] = v
+	}
+	return tenants, fwd, nil
+}
+
+// safeHeaderValue accepts printable ASCII without control characters,
+// at most 256 bytes.
+func safeHeaderValue(v string) bool {
+	if v == "" || len(v) > 256 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func claimAt(claims map[string]any, path string) any {
+	var v any = claims
+	for _, part := range strings.Split(path, ".") {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = m[part]
+	}
+	return v
+}
+
+func (g *Gateway) verifyToken(ctx context.Context, raw string) ([]string, map[string]any, error) {
 	if raw == "" {
-		return nil, errNoToken
+		return nil, nil, errNoToken
 	}
 	if len(raw) > maxTokenLength {
-		return nil, errors.New("token too large")
+		return nil, nil, errors.New("token too large")
 	}
 	tok, err := jwt.ParseSigned(raw, g.algs)
 	if err != nil {
-		return nil, errors.New("malformed or disallowed algorithm")
+		return nil, nil, errors.New("malformed or disallowed algorithm")
 	}
 	if len(tok.Headers) != 1 {
-		return nil, errors.New("unexpected number of signatures")
+		return nil, nil, errors.New("unexpected number of signatures")
 	}
 	h := tok.Headers[0]
 	key, ok := g.keys.get(ctx, h.KeyID)
 	if !ok {
-		return nil, errors.New("unknown kid")
+		return nil, nil, errors.New("unknown kid")
 	}
 	// If the provider pins an algorithm on the key, the token must use it.
 	if key.Algorithm != "" && key.Algorithm != h.Algorithm {
-		return nil, errors.New("algorithm does not match key")
+		return nil, nil, errors.New("algorithm does not match key")
 	}
 	var std jwt.Claims
 	var custom map[string]any
 	if err := tok.Claims(key.Key, &std, &custom); err != nil {
-		return nil, errors.New("bad signature")
+		return nil, nil, errors.New("bad signature")
 	}
 	id := g.f.Identity
 	now := g.now()
 	if std.Expiry == nil {
-		return nil, errors.New("token has no exp")
+		return nil, nil, errors.New("token has no exp")
 	}
 	if err := std.ValidateWithLeeway(jwt.Expected{
 		Issuer:      id.Issuer,
 		AnyAudience: jwt.Audience(id.Audiences),
 		Time:        now,
 	}, time.Duration(id.Leeway)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for name, want := range id.RequiredClaims {
 		got, ok := custom[name].(string)
 		if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			return nil, errors.New("required claim " + name + " missing or different")
+			return nil, nil, errors.New("required claim " + name + " missing or different")
 		}
 	}
 	if max := time.Duration(id.MaxTokenAge); max > 0 {
 		if std.IssuedAt == nil || now.Sub(std.IssuedAt.Time()) > max {
-			return nil, errors.New("token too old")
+			return nil, nil, errors.New("token too old")
 		}
 	}
-	return tenantsFromClaim(custom, id.TenantClaim)
+	t, err := tenantsFromClaim(custom, id.TenantClaim)
+	return t, custom, err
 }
 
 // tenantsFromClaim reads a string or an array of strings at a dotted
@@ -294,7 +341,7 @@ func (g *Gateway) auth(w http.ResponseWriter, r *http.Request) {
 	}
 	attrs = append(attrs, "app", rt.App)
 
-	tenants, err := g.verify(r.Context(), g.token(r))
+	tenants, identity, err := g.verify(r.Context(), g.token(r))
 	if err != nil {
 		attrs = append(attrs, "error", err.Error())
 		if g.f.Unauthenticated == "deny" {
@@ -341,6 +388,9 @@ func (g *Gateway) auth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Set(g.f.Pass.Header, p)
+	for hdr, v := range identity {
+		h.Set(hdr, v)
+	}
 	log(slog.LevelInfo, "ok", "")
 	g.respond(w, http.StatusOK, "ok")
 }

@@ -40,6 +40,7 @@ The gateway verifies a JWT issued by your identity provider (OIDC ID token, acce
 - only asymmetric algorithms (`RS256`, `ES256`, `EdDSA` by default; `HS*` and `none` are never accepted); if a JWK pins `alg`, the token must use it;
 - `iss` must equal `identity.issuer`; `aud` must contain one of `identity.audiences`; `exp` is required; `nbf` and `iat` are honoured; optional `max_token_age`;
 - the tenant claim (`identity.tenant_claim`, dotted paths allowed) is a string or an array of strings;
+- optional `identity.forward_claims`: claims returned as headers with the pass, so the application need not see the token (see below);
 - optional `identity.required_claims`: string claims that must match exactly, for example `{"azp": "web-app"}` or `{"typ": "Bearer"}`, so that tokens issued to other clients or for other purposes (an ID token where an access token is expected) are not accepted just because their audience overlaps.
 
 The token is read from `Authorization: Bearer` (if `authorization_header` is true), then from the cookie named `identity.cookie`.
@@ -101,7 +102,7 @@ Passes always carry the **tenant ID** (`tenant` claim), with `aud` = the route's
 | `listen` | `127.0.0.1:9180` | Listen address. |
 | `tls` | | `cert_file`, `key_file`; `client_ca_file` makes client certificates **required** (only the proxy may call). |
 | `insecure_plaintext_http` | `false` | Plain HTTP. Allowed on a loopback address (sidecar next to the proxy); elsewhere requires `allow_insecure_plaintext` (testing only). |
-| `caller_secret_file` | | If set, callers must send `Tenant-Pass-Gateway-Secret` with this value (≥ 16 characters). |
+| `caller_secret_file` | | If set, callers must send `Tenant-Pass-Gateway-Secret` with this value (≥ 16 characters). On a non-loopback `listen`, `caller_secret_file` or `tls.client_ca_file` is **required**. |
 | `kms.vault` | | Vault/OpenBao connection, see [kms.md](kms.md). |
 | `signing_key` | required | `id` (the pass `kid`) and either `private_key_file` (PEM) or `transit` (`key`, `version`). |
 | `identity.*` | | See above. `jwks_tls` (`ca_file`, …) for a private IdP CA. `max_token_age` rejects tokens whose `iat` is older. |
@@ -189,9 +190,37 @@ Set `request.host_header` to `Host`, allow `authorization` and `cookie` in `allo
 
 Verify your proxy before going live: a request **without** a session but **with** a forged `Tenant-Pass` header must reach the application without that header.
 
+## Keeping session tokens away from the application
+
+The strongest protection against a compromised application replaying session tokens is to never give it one. With `identity.forward_claims`, the gateway returns verified claims as headers (only together with a pass), and the proxy forwards those instead of the token:
+
+```json
+"identity": { "...": "...", "forward_claims": {"Tenant-Pass-User": "sub", "Tenant-Pass-Email": "email"} }
+```
+
+```caddyfile
+route {
+	request_header -Tenant-Pass
+	request_header -Tenant-Pass-User
+	forward_auth 127.0.0.1:9180 {
+		uri /
+		copy_headers Tenant-Pass Tenant-Pass-User
+	}
+	# The application gets the user ID, never the session token.
+	request_header -Authorization
+	reverse_proxy billing:8080
+}
+```
+
+(Tested with Caddy 2: the application receives the pass and `Tenant-Pass-User`, no `Authorization`, and client-supplied `Tenant-Pass-User` headers are removed.)
+
+Rules: a forwarded claim must be a string of printable ASCII (at most 256 bytes); if it is missing or unsafe, the token is treated as invalid and no pass is issued. Header names such as `Authorization`, `Cookie` and `Host` are refused. **Strip every forwarded header name from client requests** at the proxy, as for `Tenant-Pass`.
+
+For cookie sessions, use a dedicated cookie for the identity provider session and remove it in the proxy (nginx: rewrite `$http_cookie`; Caddy: a `request_header` with a regular-expression replacement), so the application keeps its own cookies but never sees the IdP session.
+
 ## Residual risks
 
-- **The application sees the user's session token.** The proxy forwards cookies and `Authorization` to the application, as usual. A compromised application can replay a user's session token to the gateway (or through the proxy) and obtain passes for every tenant in that user's tenant claim, until the token expires. Mitigations: protect the gateway with `caller_secret_file` or mTLS (`client_ca_file`) so only the proxy can call it; keep session tokens short-lived or set `identity.max_token_age`; give staff accounts that belong to many tenants separate, short sessions; and where the application does not need the raw session credential, have the proxy remove it before forwarding.
+- **If the application still sees session tokens**, a compromised application can replay a user's token through the proxy and obtain passes for every tenant in that user's tenant claim, until the token expires. Use `forward_claims` and strip the token (above). Otherwise: keep session tokens short-lived or set `identity.max_token_age`, and give staff accounts that belong to many tenants separate, short sessions. Direct calls to the gateway are blocked by caller authentication, which is mandatory off loopback.
 - **Load on the KMS.** With a Transit signing key, every authenticated request causes one Vault sign operation. Size Vault accordingly, and rate-limit at the proxy if needed.
 
 ## Deployment

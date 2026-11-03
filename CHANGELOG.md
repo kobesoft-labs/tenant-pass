@@ -19,4 +19,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - Job tickets (`tenant-pass/v1/job`): `POST /v1/job-tickets` (opt-in per application) and trusted external issuers for scheduled work; `sign-job-ticket` and `gen-signing-key` commands.
 - Key management through HashiCorp Vault / OpenBao Transit: rotation keys (HMAC, version-pinned), job ticket signing key and gateway signing key (Ed25519, verified locally).
 - `tenant-pass-gateway`: forward-auth gateway for Caddy, nginx, Traefik and Envoy. Verifies identity-provider JWTs (JWKS, asymmetric algorithms only) and signs passes only for the user's own tenant.
+- Gateway `identity.forward_claims`: forward verified user claims as headers so applications never need the session token; caller authentication (secret or mTLS) is mandatory on non-loopback addresses.
+- Each pass can be exchanged for at most one job ticket (per replica).
 - Documentation in English and Japanese.

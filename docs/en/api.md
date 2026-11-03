@@ -133,7 +133,7 @@ tenant-pass writes one JSON line per request to standard output: `"msg":"credent
 | `via` | `pass` or `ticket`. |
 | `issuer` | For tickets: the key ID that signed it. |
 | `result` | `ok` or the error code returned to the client. |
-| `reason` | Why it failed: `app_auth`, `body_size`, `body_json`, `content_type`, `pass_malformed`, `pass_unknown_key`, `pass_signature`, `pass_claims`, `pass_expired`, `pass_audience`, `distinct_tenants`, `distinct_tenants_jobs`, `pass_or_ticket`, `jobs_not_enabled`, `job_issue_not_enabled`, `issuer_not_allowed`, `ticket_lifetime`, `ticket_*` (as `pass_*`), `ttl`, `sign_error`, `tenant_not_found`, `tenant_disabled`, `directory_error`, `directory_mismatch`, `unknown_node`, `account_refused`, `clock_skew`, `timeout`, `store_error`, `max_concurrent_requests`. |
+| `reason` | Why it failed: `app_auth`, `body_size`, `body_json`, `content_type`, `pass_malformed`, `pass_unknown_key`, `pass_signature`, `pass_claims`, `pass_expired`, `pass_audience`, `distinct_tenants`, `distinct_tenants_jobs`, `pass_or_ticket`, `jobs_not_enabled`, `job_issue_not_enabled`, `issuer_not_allowed`, `ticket_lifetime`, `pass_already_used`, `ticket_*` (as `pass_*`), `ttl`, `sign_error`, `tenant_not_found`, `tenant_disabled`, `directory_error`, `directory_mismatch`, `unknown_node`, `account_refused`, `clock_skew`, `timeout`, `store_error`, `max_concurrent_requests`. |
 | `error` | For `directory_error` / `store_error` / `account_refused`: the error class (SQLSTATE, MySQL error number, Redis error prefix, refusal reason). Server error messages are not copied. |
 | `changed` | Whether the store was modified. |
 | `window`, `key_id` | Which window and rotation key the credential belongs to. |

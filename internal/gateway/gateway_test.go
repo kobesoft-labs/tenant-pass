@@ -335,6 +335,50 @@ func TestJWKSRefreshNotCancellableAndStale(t *testing.T) {
 	}
 }
 
+func TestForwardClaims(t *testing.T) {
+	fx := setup(t, func(f *File) { f.Identity.ForwardClaims = map[string]string{"Tenant-Pass-User": "sub"} })
+	w := fx.call("acme.billing.example.com", fx.idp.userToken(t, "acme"), "")
+	if w.Header().Get("Tenant-Pass") == "" || w.Header().Get("Tenant-Pass-User") != "u1" {
+		t.Fatalf("identity header: %v", w.Header())
+	}
+	// No identity headers without a pass.
+	w = fx.call("beta.billing.example.com", fx.idp.userToken(t, "acme"), "")
+	if w.Header().Get("Tenant-Pass-User") != "" {
+		t.Fatal("identity header on refusal")
+	}
+	// A token whose claim is missing or unsafe gets no pass.
+	now := time.Now()
+	for _, sub := range []any{nil, "a\r\nX-Evil: 1", 7} {
+		m := map[string]any{"iss": issuer, "aud": "tenant-apps", "exp": now.Add(time.Hour).Unix(), "tenant_id": "acme"}
+		if sub != nil {
+			m["sub"] = sub
+		}
+		tok := fx.idp.token(t, jose.RS256, "rsa1", fx.idp.rsaKey, m)
+		if w := fx.call("acme.billing.example.com", tok, ""); w.Header().Get("Tenant-Pass") != "" {
+			t.Errorf("sub %v: pass issued", sub)
+		}
+	}
+}
+
+func TestCallerAuthRequiredOffLoopback(t *testing.T) {
+	f := *setup(t, nil).g.f
+	f.InsecurePlaintextHTTP, f.AllowInsecurePlaintext = false, false
+	f.Listen = "0.0.0.0:9180"
+	f.TLS.CertFile, f.TLS.KeyFile = "c", "k"
+	if _, err := f.validate(); err == nil || !strings.Contains(err.Error(), "callers must be authenticated") {
+		t.Fatalf("err = %v", err)
+	}
+	f.TLS.ClientCAFile = "ca.pem"
+	if _, err := f.validate(); err != nil {
+		t.Fatal(err)
+	}
+	bad := f
+	bad.Identity.ForwardClaims = map[string]string{"Cookie": "sub"}
+	if _, err := bad.validate(); err == nil {
+		t.Fatal("forwarding into Cookie accepted")
+	}
+}
+
 func TestDenyMode(t *testing.T) {
 	fx := setup(t, func(f *File) { f.Unauthenticated = "deny" })
 	if w := fx.call("acme.billing.example.com", "", ""); w.Code != 401 {

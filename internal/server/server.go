@@ -94,6 +94,9 @@ type Server struct {
 	repairMu   sync.Mutex
 	lastRepair map[string]time.Time
 
+	// ticketPasses makes each pass exchangeable for one job ticket.
+	ticketPasses passReplay
+
 	readyMu  sync.Mutex
 	readyAt  time.Time
 	readyErr error
@@ -510,6 +513,11 @@ func (s *Server) jobTickets(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.IssueTimeout)
 	defer cancel()
+	// One ticket per pass (per replica).
+	if !s.ticketPasses.use(claims.ID, claims.Expiry, time.Now()) {
+		x.fail(http.StatusForbidden, codeDenied, "pass_already_used")
+		return
+	}
 	// Resolve now, so the ticket names the canonical tenant ID and is
 	// only issued for an enabled tenant this application may access.
 	t, ok := x.resolve(ctx, app, claims.Host, claims.Tenant)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,37 @@ func TestJobTicketRejections(t *testing.T) {
 		if code != c.code || (c.err != "" && out["error"] != c.err) {
 			t.Errorf("%s: %d %v", c.name, code, out)
 		}
+	}
+}
+
+func TestOneTicketPerPass(t *testing.T) {
+	e, _ := jobEnv(t)
+	p := e.pass(t, "billing", "acme.example.com")
+	if code, _ := e.post(t, "/v1/job-tickets", "tpa_billing", `{"pass":"`+p+`"}`); code != 200 {
+		t.Fatalf("first: %d", code)
+	}
+	if code, out := e.post(t, "/v1/job-tickets", "tpa_billing", `{"pass":"`+p+`"}`); code != 403 || out["error"] != codeDenied {
+		t.Fatalf("second: %d %v", code, out)
+	}
+	// The same pass still works for credentials (a request may reconnect).
+	if code, _ := e.post(t, "/v1/credentials", "tpa_billing", `{"pass":"`+p+`"}`); code != 200 {
+		t.Fatalf("credentials after ticket: %d", code)
+	}
+}
+
+func TestPassReplayBounded(t *testing.T) {
+	var r passReplay
+	now := time.Now()
+	for i := range maxSeenPasses {
+		if !r.use(strconv.Itoa(i), now.Add(time.Minute), now) {
+			t.Fatal("refused before full")
+		}
+	}
+	if r.use("new", now.Add(time.Minute), now) {
+		t.Fatal("accepted when full of live entries (must fail closed)")
+	}
+	if !r.use("new", now.Add(3*time.Minute), now.Add(2*time.Minute)) {
+		t.Fatal("expired entries not evicted")
 	}
 }
 

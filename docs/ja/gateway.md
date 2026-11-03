@@ -40,6 +40,7 @@ browser ──▶ proxy (Caddy / nginx / Traefik / Envoy)
 - 非対称アルゴリズムのみ（デフォルトでは `RS256`、`ES256`、`EdDSA`。`HS*` と `none` は決して受け付けません）。JWK が `alg` を固定している場合、トークンはそれを使っていなければなりません。
 - `iss` は `identity.issuer` と等しくなければなりません。`aud` は `identity.audiences` のいずれかを含んでいなければなりません。`exp` は必須です。`nbf` と `iat` は考慮されます。`max_token_age` は任意です。
 - テナントクレーム（`identity.tenant_claim`。ドット区切りのパスも使えます）は、文字列または文字列の配列です。
+- 任意の `identity.forward_claims`: パスと一緒にヘッダーで返すクレーム。アプリケーションがトークンを見なくて済むようにします（下記）。
 - 任意の `identity.required_claims`: 完全に一致しなければならない文字列クレーム（たとえば `{"azp": "web-app"}` や `{"typ": "Bearer"}`）。これにより、他のクライアント向けや他の目的で発行されたトークン（アクセストークンが期待される場所での ID トークンなど）が、オーディエンスが重なるという理由だけで受け付けられることを防ぎます。
 
 トークンは `Authorization: Bearer`（`authorization_header` が true の場合）から、次に `identity.cookie` という名前の Cookie から読み取られます。
@@ -101,7 +102,7 @@ JWKS の扱い: 使われるのは `kid` を持つ署名用の公開鍵だけで
 | `listen` | `127.0.0.1:9180` | 待ち受けアドレス。 |
 | `tls` | | `cert_file`、`key_file`。`client_ca_file` を設定するとクライアント証明書が **必須** になります（プロキシだけが呼び出せるようになります）。 |
 | `insecure_plaintext_http` | `false` | 平文の HTTP。ループバックアドレス上（プロキシの隣のサイドカー）では許可されます。それ以外では `allow_insecure_plaintext` が必要です（テスト専用）。 |
-| `caller_secret_file` | | 設定した場合、呼び出し元はこの値を `Tenant-Pass-Gateway-Secret` で送らなければなりません（16 文字以上）。 |
+| `caller_secret_file` | | 設定した場合、呼び出し元はこの値を `Tenant-Pass-Gateway-Secret` で送らなければなりません（16 文字以上）。`listen` がループバック以外の場合は、`caller_secret_file` または `tls.client_ca_file` が**必須**です。 |
 | `kms.vault` | | Vault/OpenBao への接続。[kms.md](kms.md) を参照してください。 |
 | `signing_key` | 必須 | `id`（パスの `kid`）と、`private_key_file`（PEM）または `transit`（`key`、`version`）のいずれか。 |
 | `identity.*` | | 上記を参照してください。`jwks_tls`（`ca_file` など）はプライベートな IdP の CA 用です。`max_token_age` は、`iat` がそれより古いトークンを拒否します。 |
@@ -189,9 +190,37 @@ http:
 
 本番運用を始める前にプロキシを検証してください。セッションが **なく**、偽造した `Tenant-Pass` ヘッダーが **ある** リクエストは、そのヘッダーを持たない状態でアプリケーションに届かなければなりません。
 
+## セッショントークンをアプリケーションに渡さない
+
+侵害されたアプリケーションによるセッショントークンのリプレイを防ぐ最も確実な方法は、そもそもトークンを渡さないことです。`identity.forward_claims` を設定すると、ゲートウェイは検証済みのクレームを（パスと一緒の場合だけ）ヘッダーで返し、プロキシはトークンの代わりにそれを転送します。
+
+```json
+"identity": { "...": "...", "forward_claims": {"Tenant-Pass-User": "sub", "Tenant-Pass-Email": "email"} }
+```
+
+```caddyfile
+route {
+	request_header -Tenant-Pass
+	request_header -Tenant-Pass-User
+	forward_auth 127.0.0.1:9180 {
+		uri /
+		copy_headers Tenant-Pass Tenant-Pass-User
+	}
+	# The application gets the user ID, never the session token.
+	request_header -Authorization
+	reverse_proxy billing:8080
+}
+```
+
+（Caddy 2 で検証済みです。アプリケーションはパスと `Tenant-Pass-User` を受け取り、`Authorization` は受け取りません。クライアントが送った `Tenant-Pass-User` ヘッダーは取り除かれます。）
+
+決まり: 転送するクレームは、印字可能な ASCII の文字列（256 バイト以下）でなければなりません。存在しない、または安全でない場合、そのトークンは無効として扱われ、パスは発行されません。`Authorization`、`Cookie`、`Host` などのヘッダー名は拒否されます。`Tenant-Pass` と同様に、**転送するすべてのヘッダー名を、プロキシでクライアントのリクエストから取り除いてください**。
+
+Cookie によるセッションの場合は、ID プロバイダーのセッション専用の Cookie を使い、プロキシでそれを取り除いてください（nginx: `$http_cookie` を書き換える。Caddy: 正規表現で置換する `request_header`）。こうすると、アプリケーションは自身の Cookie を使い続けられますが、IdP のセッションは見えません。
+
 ## 残存リスク
 
-- **アプリケーションはユーザーのセッショントークンを見る。** プロキシは、通常どおり Cookie と `Authorization` をアプリケーションに転送します。侵害されたアプリケーションは、ユーザーのセッショントークンをゲートウェイに（またはプロキシを通じて）リプレイし、トークンが失効するまで、そのユーザーのテナントクレームに含まれるすべてのテナントのパスを入手できます。緩和策: プロキシだけがゲートウェイを呼び出せるように、`caller_secret_file` または mTLS（`client_ca_file`）でゲートウェイを保護する。セッショントークンを短命にするか、`identity.max_token_age` を設定する。多数のテナントに属するスタッフのアカウントには、別の短いセッションを与える。アプリケーションが生のセッション認証情報を必要としない場合は、転送する前にプロキシでそれを取り除く。
+- **アプリケーションが依然としてセッショントークンを見られる場合**、侵害されたアプリケーションは、ユーザーのトークンをプロキシ経由でリプレイし、トークンが失効するまで、そのユーザーのテナントクレームに含まれるすべてのテナントのパスを入手できます。`forward_claims` を使い、トークンを取り除いてください（上記）。それができない場合は、セッショントークンを短命にするか `identity.max_token_age` を設定し、多数のテナントに属するスタッフのアカウントには別の短いセッションを与えてください。ゲートウェイを直接呼び出すことは、呼び出し元の認証（ループバック以外では必須）で防がれます。
 - **KMS への負荷。** Transit の署名鍵を使う場合、認証されたリクエストごとに Vault の署名操作が 1 回発生します。それに応じて Vault の規模を決め、必要であればプロキシでレート制限してください。
 
 ## デプロイ
