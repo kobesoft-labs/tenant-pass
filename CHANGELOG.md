@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-03
+
+First public release. Pre-1.0: configuration and API may still change. Not yet externally audited.
+
 ### Added
 
 - `POST /v1/credentials`: exchange a gateway-signed pass for a short-lived tenant credential.
@@ -42,3 +46,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - PostgreSQL: the isolation check also runs in readiness/`check-config -connect` and is repeated every 5 minutes; `endpoint.database` is required.
 - Gateway: concurrency cap; `identity.single_tenant_tokens`; documentation states that per-tenant session scoping, not Fetch Metadata, is the boundary against browser-driven pass collection.
 - Secret files are opened non-blocking (a FIFO cannot hang startup); Go toolchain pinned to 1.26.10.
+
+[Unreleased]: https://github.com/kobesoft-labs/tenant-pass/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/kobesoft-labs/tenant-pass/releases/tag/v0.1.0

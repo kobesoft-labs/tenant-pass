@@ -10,6 +10,8 @@ tenant-pass is security infrastructure. We take reports seriously and appreciate
 
 https://github.com/kobesoft-labs/tenant-pass/security/advisories/new
 
+If you cannot use GitHub, email **dev@kobesoft.co.jp** with "tenant-pass security" in the subject.
+
 Please include:
 
 - the affected version or commit;
@@ -53,6 +55,8 @@ tenant-pass はセキュリティの基盤となるソフトウェアです。�
 **公開の Issue は作らないでください。** GitHub の非公開の脆弱性報告から送ってください。
 
 https://github.com/kobesoft-labs/tenant-pass/security/advisories/new
+
+GitHub を使えない場合は、件名に「tenant-pass security」と入れて **dev@kobesoft.co.jp** へメールしてください。
 
 次の内容を含めてください。
 
