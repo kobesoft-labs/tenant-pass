@@ -1,0 +1,85 @@
+{
+  "listen": "0.0.0.0:8443",
+  "tls": {
+    "cert_file": "/run/secrets/tenant-pass.crt",
+    "key_file": "/run/secrets/tenant-pass.key",
+    "client_ca_file": "/etc/tenant-pass/client-ca.pem"
+  },
+
+  "gateway_keys": [
+    {"id": "gw-2026-11", "public_key_file": "/etc/tenant-pass/gateway-2026-11.pub"}
+  ],
+  "pass": {"max_ttl": "60s", "leeway": "5s"},
+
+  "apps": [
+    {"name": "billing", "token_sha256": "e24661e92e68b261d46cc6a08d6ee2a5c879f80a15476edb53ebb0860f1fa42e"},
+    {"name": "reports", "client_cert_uri": "spiffe://example.internal/reports"}
+  ],
+
+  "directory": {
+    "sql": {
+      "driver": "postgres",
+      "endpoint": {
+        "address": "control-db.internal:5432",
+        "user": "tenant_pass_reader",
+        "password_file": "/run/secrets/directory-password",
+        "database": "control",
+        "tls": {"ca_file": "/etc/tenant-pass/db-ca.pem"}
+      },
+      "by_host": "SELECT t.id AS tenant_id, t.node, t.account, t.status = 'active' AS enabled FROM tenant_domains d JOIN tenants t ON t.id = d.tenant_id WHERE d.domain = $1 AND d.status = 'verified' AND $2 = ANY (t.apps)",
+      "by_tenant": "SELECT id AS tenant_id, node, account, status = 'active' AS enabled FROM tenants WHERE id = $1 AND $2 = ANY (apps)"
+    }
+  },
+
+  "rotation": {
+    "window": "15m",
+    "renew_before": "5m",
+    "sweep_interval": "30s",
+    "keys": [
+      {"id": "r-2026-11", "secret_file": "/run/secrets/rotation-2026-11", "not_before": "2026-11-01T00:00:00Z"}
+    ]
+  },
+
+  "nodes": [
+    {
+      "name": "pg1",
+      "type": "postgres",
+      "endpoint": {
+        "address": "pg1.internal:5432",
+        "user": "tenant_pass_admin",
+        "password_file": "/run/secrets/pg1-admin-password",
+        "tls": {"ca_file": "/etc/tenant-pass/db-ca.pem"}
+      },
+      "managed_group": "tenant_pass_managed",
+      "account_pattern": "^t_[a-z0-9_]{1,40}$",
+      "connect": {"host": "pgbouncer.internal", "port": 6432, "database": "app"}
+    },
+    {
+      "name": "my1",
+      "type": "mysql",
+      "endpoint": {
+        "address": "my1.internal:3306",
+        "user": "tenant_pass_admin",
+        "password_file": "/run/secrets/my1-admin-password",
+        "tls": {"ca_file": "/etc/tenant-pass/db-ca.pem"}
+      },
+      "managed_role": "tenant_pass_managed",
+      "account_pattern": "^t_[a-z0-9_]{1,30}$",
+      "connect": {"host": "my1.internal", "port": 3306, "database": "app"}
+    },
+    {
+      "name": "cache1",
+      "type": "redis",
+      "servers": [
+        {"address": "cache1-a.internal:6380", "user": "tenant_pass_admin", "password_file": "/run/secrets/cache1-admin-password", "tls": {"ca_file": "/etc/tenant-pass/db-ca.pem"}},
+        {"address": "cache1-b.internal:6380", "user": "tenant_pass_admin", "password_file": "/run/secrets/cache1-admin-password", "tls": {"ca_file": "/etc/tenant-pass/db-ca.pem"}}
+      ],
+      "account_pattern": "^t_[a-z0-9_]{1,40}$",
+      "connect": {"host": "cache1.internal", "port": 6380}
+    }
+  ],
+
+  "limits": {"max_tenants_per_minute": 60, "issue_timeout": "5s", "max_concurrent_requests": 256},
+  "shutdown": {"drain": "5s", "timeout": "10s"},
+  "log_level": "info"
+}

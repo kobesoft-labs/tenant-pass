@@ -1,0 +1,61 @@
+# Continuous integration. Third-party actions are pinned to full commit
+# SHAs (a tag can be moved; a SHA cannot). Dependabot keeps them current.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: unit tests
+        run: go test -race -count=1 ./...
+      - name: derivation vectors (independent Python implementation)
+        run: python3 -I scripts/derivation_vectors.py | grep -q 'password=umDNGPl6N-JiorUfr9q4CsXCpmElUrtKZ2uOnp4T8RM'
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: integration tests (PostgreSQL 18, MySQL 8.4, Redis 8)
+        run: scripts/integration.sh -v
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: fuzz (short)
+        run: |
+          go test -run=NONE -fuzz=FuzzVerify -fuzztime=60s ./internal/paseto
+          go test -run=NONE -fuzz=FuzzVerify -fuzztime=60s ./pass
+          go test -run=NONE -fuzz=FuzzDecode -fuzztime=60s ./internal/strictjson
