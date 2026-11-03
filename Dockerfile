@@ -11,7 +11,7 @@
 # tenant-pass derives passwords). Run them as separate images, never in
 # one container.
 
-FROM golang:1.26-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS build
+FROM golang:1.27-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify
