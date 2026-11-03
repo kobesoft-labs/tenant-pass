@@ -6,12 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 	"github.com/kobesoft-labs/tenant-pass/internal/rotation"
 )
 
 func sched(t *testing.T) *rotation.Schedule {
 	t.Helper()
-	s, err := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", Secret: make([]byte, 32)}})
+	s, err := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", MAC: kms.NewLocalMAC(make([]byte, 32))}})
 	if err != nil {
 		t.Fatal(err)
 	}

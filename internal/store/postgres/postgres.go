@@ -330,14 +330,14 @@ func (s *Store) Issue(ctx context.Context, role string, repair bool) (store.Cred
 		if err != nil {
 			return err
 		}
-		cred, err = store.Build(s.sched, acc, act.window, act.write)
+		cred, err = store.Build(ctx, s.sched, acc, act.window, act.write)
 		if err != nil {
 			return err
 		}
 		if !act.write {
 			return nil
 		}
-		salt, err := s.sched.Salt(acc, act.window)
+		salt, err := s.sched.Salt(ctx, acc, act.window)
 		if err != nil {
 			return err
 		}

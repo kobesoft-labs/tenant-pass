@@ -23,18 +23,23 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/kobesoft-labs/tenant-pass/internal/directory"
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 	"github.com/kobesoft-labs/tenant-pass/internal/netcfg"
 	"github.com/kobesoft-labs/tenant-pass/internal/rotation"
 	"github.com/kobesoft-labs/tenant-pass/internal/secret"
 	"github.com/kobesoft-labs/tenant-pass/internal/strictjson"
 	"github.com/kobesoft-labs/tenant-pass/pass"
 )
+
+// HardMaxJobTTL is the largest permitted job ticket lifetime.
+const HardMaxJobTTL = 24 * time.Hour
 
 // MaxFileSize bounds the configuration file.
 const MaxFileSize = 4 << 20
@@ -72,6 +77,8 @@ type File struct {
 	Apps        []AppConfig   `json:"apps"`
 	Directory   DirectoryFile `json:"directory"`
 	Rotation    RotationFile  `json:"rotation"`
+	KMS         KMSFile       `json:"kms"`
+	JobTickets  *JobTickets   `json:"job_tickets"`
 	Nodes       []NodeFile    `json:"nodes"`
 	Limits      Limits        `json:"limits"`
 	Shutdown    Shutdown      `json:"shutdown"`
@@ -103,6 +110,71 @@ type AppConfig struct {
 	Name          string `json:"name"`
 	TokenSHA256   string `json:"token_sha256"`
 	ClientCertURI string `json:"client_cert_uri"`
+	// Jobs enables job tickets for this application. Without it, the
+	// application can neither obtain nor redeem job tickets.
+	Jobs *AppJobs `json:"jobs"`
+}
+
+// AppJobs configures job tickets for one application.
+type AppJobs struct {
+	// Issue allows the application to exchange a pass for a job ticket
+	// (POST /v1/job-tickets). Tickets from trusted issuers can be
+	// redeemed regardless.
+	Issue bool `json:"issue"`
+	// MaxTTL caps the lifetime of tickets issued to this application.
+	MaxTTL Duration `json:"max_ttl"`
+	// MaxTenantsPerMinute limits distinct tenants per minute for
+	// credentials obtained with job tickets (separately from passes),
+	// per replica.
+	MaxTenantsPerMinute int `json:"max_tenants_per_minute"`
+	// TrustedIssuers lists the job_tickets.trusted_issuers IDs whose
+	// tickets this application may redeem. Tickets signed by tenant-pass's
+	// own signing key are always accepted (they are only issued to the
+	// application named in them).
+	TrustedIssuers []string `json:"trusted_issuers"`
+}
+
+// JobTickets configures job tickets globally.
+type JobTickets struct {
+	// SigningKey is tenant-pass's own key for tickets it issues
+	// (POST /v1/job-tickets). Optional if only trusted issuers sign.
+	SigningKey *SigningKeyFile `json:"signing_key"`
+	// TrustedIssuers are external signers (for example a scheduler)
+	// whose tickets tenant-pass accepts.
+	TrustedIssuers []GatewayKey `json:"trusted_issuers"`
+	// MaxTTL is the largest exp - iat accepted for any ticket.
+	MaxTTL Duration `json:"max_ttl"`
+}
+
+// SigningKeyFile is an Ed25519 signing key: a local PEM file or a
+// Transit key.
+type SigningKeyFile struct {
+	ID             string      `json:"id"`
+	PrivateKeyFile string      `json:"private_key_file"`
+	Transit        *TransitKey `json:"transit"`
+}
+
+// TransitKey names a key in Vault/OpenBao Transit, pinned to a version.
+type TransitKey struct {
+	Key     string `json:"key"`
+	Version int    `json:"version"`
+}
+
+// KMSFile configures external key management.
+type KMSFile struct {
+	Vault *VaultFile `json:"vault"`
+}
+
+// VaultFile configures the Vault/OpenBao connection.
+type VaultFile struct {
+	Address   string     `json:"address"`
+	TokenFile string     `json:"token_file"`
+	Namespace string     `json:"namespace"`
+	Mount     string     `json:"mount"`
+	TLS       netcfg.TLS `json:"tls"`
+	// InsecurePlaintext allows an http:// address. Requires the global
+	// allow_insecure_plaintext. Testing only.
+	InsecurePlaintext bool `json:"insecure_plaintext"`
 }
 
 // DirectoryFile selects and configures the directory. Exactly one member
@@ -134,9 +206,11 @@ type RotationFile struct {
 
 // RotationKey is one rotation key.
 type RotationKey struct {
-	ID         string    `json:"id"`
-	SecretFile string    `json:"secret_file"`
-	NotBefore  time.Time `json:"not_before"`
+	ID string `json:"id"`
+	// Exactly one of SecretFile and Transit.
+	SecretFile string      `json:"secret_file"`
+	Transit    *TransitKey `json:"transit"`
+	NotBefore  time.Time   `json:"not_before"`
 }
 
 // NodeFile configures one store node.
@@ -279,6 +353,21 @@ type Resolved struct {
 	DirectorySQL    *directory.SQLConfig
 
 	Nodes []ResolvedNode
+
+	// Vault is the KMS client, if configured.
+	Vault *kms.Vault
+	// Jobs is non-nil when job tickets are configured.
+	Jobs *ResolvedJobs
+}
+
+// ResolvedJobs holds job ticket settings. The signer is created by the
+// caller (a Transit signer needs a network round trip).
+type ResolvedJobs struct {
+	SigningKeyID string
+	LocalSigner  ed25519.PrivateKey // nil when Transit is used
+	Transit      *TransitKey        // nil when a local key is used
+	Issuers      map[string]ed25519.PublicKey
+	MaxTTL       time.Duration
 }
 
 // ResolvedApp is an application with its token hash decoded.
@@ -286,6 +375,7 @@ type ResolvedApp struct {
 	Name          string
 	TokenSHA256   []byte
 	ClientCertURI string
+	Jobs          *AppJobs
 }
 
 // ResolvedNode is a node with its endpoints resolved.
@@ -366,7 +456,57 @@ func Resolve(f *File, now time.Time) (*Resolved, error) {
 		if a.ClientCertURI != "" && f.TLS.ClientCAFile == "" {
 			fail("app %q: client_cert_uri requires tls.client_ca_file", a.Name)
 		}
+		if j := a.Jobs; j != nil {
+			if f.JobTickets == nil {
+				fail("app %q: jobs requires job_tickets", a.Name)
+			}
+			if j.MaxTTL == 0 {
+				j.MaxTTL = Duration(time.Hour)
+			}
+			if j.MaxTenantsPerMinute == 0 {
+				j.MaxTenantsPerMinute = 60
+			}
+			if j.MaxTTL < Duration(time.Minute) || time.Duration(j.MaxTTL) > HardMaxJobTTL {
+				fail("app %q: jobs.max_ttl must be between 1m and %s", a.Name, HardMaxJobTTL)
+			}
+			if j.MaxTenantsPerMinute < 1 {
+				fail("app %q: jobs.max_tenants_per_minute must be positive", a.Name)
+			}
+			if j.Issue && (f.JobTickets == nil || f.JobTickets.SigningKey == nil) {
+				fail("app %q: jobs.issue requires job_tickets.signing_key", a.Name)
+			}
+		}
+		ra.Jobs = a.Jobs
 		r.Apps = append(r.Apps, ra)
+	}
+
+	// --- kms ------------------------------------------------------------
+	if v := f.KMS.Vault; v != nil {
+		vc := kms.VaultConfig{Address: v.Address, TokenFile: v.TokenFile, Namespace: v.Namespace, Mount: v.Mount}
+		ok := true
+		if v.InsecurePlaintext {
+			if !f.AllowInsecurePlaintext {
+				fail("kms.vault.insecure_plaintext requires allow_insecure_plaintext (testing only)")
+				ok = false
+			}
+		} else if u, err := url.Parse(v.Address); err != nil {
+			fail("kms.vault.address: %v", err)
+			ok = false
+		} else {
+			tc, err := v.TLS.Build(u.Hostname())
+			if err != nil {
+				fail("kms.vault.tls: %v", err)
+				ok = false
+			}
+			vc.TLS = tc
+		}
+		if ok {
+			c, err := kms.NewVault(vc)
+			if err != nil {
+				fail("kms.vault: %v", err)
+			}
+			r.Vault = c
+		}
 	}
 
 	// --- rotation -------------------------------------------------------
@@ -376,16 +516,35 @@ func Resolve(f *File, now time.Time) (*Resolved, error) {
 			fail("rotation key id %q is invalid", k.ID)
 			continue
 		}
-		v, err := secret.ReadKeyFile(k.SecretFile, rotation.MinSecretLength)
-		if err != nil {
-			fail("rotation key %q: %v", k.ID, err)
-			continue
-		}
 		if k.NotBefore.IsZero() {
 			fail("rotation key %q: not_before is required", k.ID)
 			continue
 		}
-		keys = append(keys, rotation.Key{ID: k.ID, Secret: v.Bytes(), NotBefore: k.NotBefore})
+		var mac kms.MAC
+		switch {
+		case (k.SecretFile == "") == (k.Transit == nil):
+			fail("rotation key %q: exactly one of secret_file and transit is required", k.ID)
+			continue
+		case k.Transit != nil:
+			if r.Vault == nil {
+				fail("rotation key %q: transit requires kms.vault", k.ID)
+				continue
+			}
+			m, err := r.Vault.NewTransitMAC(k.Transit.Key, k.Transit.Version)
+			if err != nil {
+				fail("rotation key %q: %v", k.ID, err)
+				continue
+			}
+			mac = m
+		default:
+			v, err := secret.ReadKeyFile(k.SecretFile, rotation.MinSecretLength)
+			if err != nil {
+				fail("rotation key %q: %v", k.ID, err)
+				continue
+			}
+			mac = kms.NewLocalMAC(v.Bytes())
+		}
+		keys = append(keys, rotation.Key{ID: k.ID, MAC: mac, NotBefore: k.NotBefore})
 	}
 	if len(errs) == 0 {
 		s, err := rotation.NewSchedule(time.Duration(f.Rotation.Window), time.Duration(f.Rotation.RenewBefore), keys)
@@ -403,6 +562,86 @@ func Resolve(f *File, now time.Time) (*Resolved, error) {
 	}
 	if si := time.Duration(f.Rotation.SweepInterval); si < 5*time.Second || si > time.Duration(f.Rotation.RenewBefore) {
 		fail("rotation.sweep_interval must be between 5s and renew_before")
+	}
+
+	// --- job tickets ----------------------------------------------------
+	if jt := f.JobTickets; jt != nil {
+		rj := &ResolvedJobs{Issuers: map[string]ed25519.PublicKey{}, MaxTTL: time.Duration(jt.MaxTTL)}
+		if rj.MaxTTL == 0 {
+			rj.MaxTTL = time.Hour
+		}
+		if rj.MaxTTL < time.Minute || rj.MaxTTL > HardMaxJobTTL {
+			fail("job_tickets.max_ttl must be between 1m and %s", HardMaxJobTTL)
+		}
+		if sk := jt.SigningKey; sk != nil {
+			rj.SigningKeyID = sk.ID
+			if !pass.NamePattern.MatchString(sk.ID) {
+				fail("job_tickets.signing_key.id %q is invalid", sk.ID)
+			}
+			switch {
+			case (sk.PrivateKeyFile == "") == (sk.Transit == nil):
+				fail("job_tickets.signing_key: exactly one of private_key_file and transit is required")
+			case sk.Transit != nil:
+				if r.Vault == nil {
+					fail("job_tickets.signing_key.transit requires kms.vault")
+				}
+				rj.Transit = sk.Transit
+			default:
+				k, err := ReadEd25519PrivateKey(sk.PrivateKeyFile)
+				if err != nil {
+					fail("job_tickets.signing_key: %v", err)
+				}
+				rj.LocalSigner = k
+			}
+		}
+		for _, k := range jt.TrustedIssuers {
+			if !pass.NamePattern.MatchString(k.ID) {
+				fail("job_tickets.trusted_issuers id %q is invalid", k.ID)
+				continue
+			}
+			if _, dup := rj.Issuers[k.ID]; dup || k.ID == rj.SigningKeyID {
+				fail("job_tickets key id %q is duplicated", k.ID)
+				continue
+			}
+			pk, err := ReadEd25519PublicKey(k.PublicKeyFile)
+			if err != nil {
+				fail("job_tickets.trusted_issuers %q: %v", k.ID, err)
+				continue
+			}
+			rj.Issuers[k.ID] = pk
+		}
+		if jt.SigningKey == nil && len(jt.TrustedIssuers) == 0 {
+			fail("job_tickets needs a signing_key or at least one trusted issuer")
+		}
+		for id := range r.GatewayKeys {
+			if _, clash := rj.Issuers[id]; clash || id == rj.SigningKeyID {
+				fail("key id %q is used both as a gateway key and a job ticket key", id)
+			}
+		}
+		// Compare key material too: the same key configured as a gateway
+		// key and as a ticket issuer (under different IDs) would let the
+		// gateway mint long-lived tickets.
+		var jobKeys []ed25519.PublicKey
+		for _, k := range rj.Issuers {
+			jobKeys = append(jobKeys, k)
+		}
+		if rj.LocalSigner != nil {
+			jobKeys = append(jobKeys, rj.LocalSigner.Public().(ed25519.PublicKey))
+		}
+		if err := DistinctKeys(r.GatewayKeys, jobKeys); err != nil {
+			fail("%v", err)
+		}
+		for _, a := range f.Apps {
+			if a.Jobs == nil {
+				continue
+			}
+			for _, id := range a.Jobs.TrustedIssuers {
+				if _, ok := rj.Issuers[id]; !ok {
+					fail("app %q: jobs.trusted_issuers names unknown issuer %q", a.Name, id)
+				}
+			}
+		}
+		r.Jobs = rj
 	}
 
 	// --- directory ------------------------------------------------------
@@ -553,6 +792,24 @@ func resolveNode(n NodeFile, allowPlain bool) (ResolvedNode, error) {
 		}
 	}
 	return rn, nil
+}
+
+// DistinctKeys returns an error if any job ticket key equals a gateway
+// key, or if two job ticket keys are equal.
+func DistinctKeys(gateway map[string]ed25519.PublicKey, jobs []ed25519.PublicKey) error {
+	for i, jk := range jobs {
+		for id, gk := range gateway {
+			if jk.Equal(gk) {
+				return fmt.Errorf("a job ticket key is identical to gateway key %q; use separate keys", id)
+			}
+		}
+		for _, other := range jobs[:i] {
+			if jk.Equal(other) {
+				return errors.New("two job ticket keys are identical")
+			}
+		}
+	}
+	return nil
 }
 
 // ReadEd25519PublicKey reads a PEM ("PUBLIC KEY", PKIX) Ed25519 public

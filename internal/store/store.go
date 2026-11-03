@@ -216,8 +216,8 @@ func Candidates(s *rotation.Schedule, a rotation.Account, now time.Time) []int64
 }
 
 // Build returns the credential for window n.
-func Build(s *rotation.Schedule, a rotation.Account, n int64, changed bool) (Credential, error) {
-	pw, kid, err := s.Password(a, n)
+func Build(ctx context.Context, s *rotation.Schedule, a rotation.Account, n int64, changed bool) (Credential, error) {
+	pw, kid, err := s.Password(ctx, a, n)
 	if err != nil {
 		return Credential{}, err
 	}

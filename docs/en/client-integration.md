@@ -36,7 +36,7 @@ The cache key is the tenant you resolved from the pass (or the `tenant` field of
   
   On PostgreSQL this is expected right after rotation (one password per role), on MySQL/Redis it should be rare. Do not retry in a loop.
 - **Open connections are fine.** A password change or expiry does not close existing connections. Connection pools can keep them; only new connections need the current password.
-- **Need a pass to refresh.** A credential can only be refreshed while handling a request that carries a fresh pass. Long-running work that outlives the window must obtain its own authorization (see [gateway integration](gateway-integration.md#background-jobs)).
+- **Need a pass or a ticket to refresh.** A credential can be refreshed while handling a request that carries a fresh pass. Work that runs later uses a job ticket instead: obtain one with `POST /v1/job-tickets` while handling the request (if enabled), or from your scheduler, and send `{"ticket": …}` instead of `{"pass": …}`. See [jobs.md](jobs.md).
 - **Errors**: `400`/`401`/`403` are permanent for that pass (log and fail the request); `429`/`503` are retryable with backoff.
 - **TLS**: verify tenant-pass's certificate. Do not disable verification.
 

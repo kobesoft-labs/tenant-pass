@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,24 @@ type Config struct {
 	IssueTimeout time.Duration
 	MaxInFlight  int
 	Logger       *slog.Logger
+
+	// Job tickets (all optional).
+	JobVerifier *pass.JobVerifier // nil: tickets are not accepted
+	JobSigner   *pass.Signer      // nil: POST /v1/job-tickets is disabled
+	// JobPolicies holds per-application job settings. An application
+	// without an entry can neither obtain nor redeem tickets.
+	JobPolicies map[string]JobPolicy
+}
+
+// JobPolicy is one application's job ticket settings.
+type JobPolicy struct {
+	Issue   bool                // may exchange passes for tickets
+	MaxTTL  time.Duration       // cap for issued and redeemed tickets
+	Limiter *ratelimit.Distinct // distinct tenants per minute for ticket redemption
+	// Issuers are the key IDs whose tickets this application may redeem
+	// (tenant-pass's own job key plus the application's allowed
+	// external issuers).
+	Issuers map[string]bool
 }
 
 // Server is the HTTP handler.
@@ -93,6 +112,7 @@ func New(cfg Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/credentials", s.credentials)
+	mux.HandleFunc("/v1/job-tickets", s.jobTickets)
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/readyz", s.readyz)
 	return secureHeaders(mux)
@@ -121,6 +141,7 @@ const (
 	codeInvalidRequest = "invalid_request"
 	codeUnauthorized   = "unauthorized"
 	codeInvalidPass    = "invalid_pass"
+	codeInvalidTicket  = "invalid_ticket"
 	codeDenied         = "denied"
 	codeRateLimited    = "rate_limited"
 	codeUnavailable    = "unavailable"
@@ -141,9 +162,11 @@ func writeError(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, map[string]string{"error": code})
 }
 
-// request is the body of POST /v1/credentials.
-type request struct {
+// credentialsRequest is the body of POST /v1/credentials. Exactly one of
+// Pass and Ticket must be set.
+type credentialsRequest struct {
 	Pass   string `json:"pass"`
+	Ticket string `json:"ticket"`
 	Repair bool   `json:"repair"`
 }
 
@@ -160,6 +183,20 @@ type response struct {
 	RefreshAt string `json:"refresh_at"`
 }
 
+// jobTicketRequest is the body of POST /v1/job-tickets.
+type jobTicketRequest struct {
+	Pass string `json:"pass"`
+	// TTL is the requested lifetime ("30m"). Optional; capped by the
+	// application's jobs.max_ttl.
+	TTL string `json:"ttl"`
+}
+
+type jobTicketResponse struct {
+	Ticket    string `json:"ticket"`
+	Tenant    string `json:"tenant"`
+	ExpiresAt string `json:"expires_at"`
+}
+
 // audit accumulates the fields of one audit log record.
 type audit struct {
 	attrs []slog.Attr
@@ -173,163 +210,241 @@ func newRequestID() string {
 	return hex.EncodeToString(b)
 }
 
-func (s *Server) credentials(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	a := &audit{}
-	a.add("request_id", newRequestID())
-	result, reason := "error", ""
-	level := slog.LevelWarn
-	defer func() {
-		a.add("result", result)
-		if reason != "" {
-			a.add("reason", reason)
-		}
-		a.add("duration_ms", time.Since(start).Milliseconds())
-		s.cfg.Logger.LogAttrs(context.Background(), level, "credential", a.attrs...)
-	}()
-	fail := func(status int, code, why string) {
-		result, reason = code, why
-		writeError(w, status, code)
-	}
+// exchange carries one request through the common steps and owns its
+// audit record.
+type exchange struct {
+	s      *Server
+	w      http.ResponseWriter
+	r      *http.Request
+	a      *audit
+	start  time.Time
+	result string
+	reason string
+	level  slog.Level
+	msg    string
+}
 
-	// 1. Method, Content-Type.
-	if r.URL.Path != "/v1/credentials" {
-		fail(http.StatusNotFound, codeNotFound, "path")
-		return
-	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		fail(http.StatusMethodNotAllowed, codeMethod, "method")
-		return
-	}
-	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		fail(http.StatusUnsupportedMediaType, codeUnsupported, "content_type")
-		return
-	}
+func (s *Server) newExchange(w http.ResponseWriter, r *http.Request, msg string) *exchange {
+	x := &exchange{s: s, w: w, r: r, a: &audit{}, start: time.Now(), result: "error", level: slog.LevelWarn, msg: msg}
+	x.a.add("request_id", newRequestID())
+	return x
+}
 
+func (x *exchange) finish() {
+	x.a.add("result", x.result)
+	if x.reason != "" {
+		x.a.add("reason", x.reason)
+	}
+	x.a.add("duration_ms", time.Since(x.start).Milliseconds())
+	x.s.cfg.Logger.LogAttrs(context.Background(), x.level, x.msg, x.a.attrs...)
+}
+
+func (x *exchange) fail(status int, code, why string) {
+	x.result, x.reason = code, why
+	writeError(x.w, status, code)
+}
+
+// failErr records err (class only) at error level and responds.
+func (x *exchange) failErr(status int, code, why string, err error) {
+	x.level = slog.LevelError
+	if err != nil {
+		x.a.add("error", err.Error())
+	}
+	x.fail(status, code, why)
+}
+
+// begin performs the steps shared by all POST endpoints: method, content
+// type, concurrency limit, application authentication, body size and
+// strict JSON parsing into v. It returns the application name, a release
+// function for the concurrency slot, and false if a response was sent.
+func (x *exchange) begin(path string, v any) (string, func(), bool) {
+	if x.r.URL.Path != path {
+		x.fail(http.StatusNotFound, codeNotFound, "path")
+		return "", nil, false
+	}
+	if x.r.Method != http.MethodPost {
+		x.w.Header().Set("Allow", http.MethodPost)
+		x.fail(http.StatusMethodNotAllowed, codeMethod, "method")
+		return "", nil, false
+	}
+	if mt, _, err := mime.ParseMediaType(x.r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		x.fail(http.StatusUnsupportedMediaType, codeUnsupported, "content_type")
+		return "", nil, false
+	}
 	// Bound concurrency before doing any real work.
 	select {
-	case s.inflight <- struct{}{}:
-		defer func() { <-s.inflight }()
+	case x.s.inflight <- struct{}{}:
 	default:
-		fail(http.StatusServiceUnavailable, codeBusy, "max_concurrent_requests")
-		return
+		x.fail(http.StatusServiceUnavailable, codeBusy, "max_concurrent_requests")
+		return "", nil, false
 	}
+	release := func() { <-x.s.inflight }
 
-	// 2. Authenticate the application.
-	app, err := s.cfg.Auth.Authenticate(r)
+	app, err := x.s.cfg.Auth.Authenticate(x.r)
 	if err != nil {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="tenant-pass"`)
-		fail(http.StatusUnauthorized, codeUnauthorized, "app_auth")
-		return
+		x.w.Header().Set("WWW-Authenticate", `Bearer realm="tenant-pass"`)
+		x.fail(http.StatusUnauthorized, codeUnauthorized, "app_auth")
+		release()
+		return "", nil, false
 	}
-	a.add("app", app)
+	x.a.add("app", app)
 
-	// 3. Read and parse the body.
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBody))
+	body, err := io.ReadAll(http.MaxBytesReader(x.w, x.r.Body, MaxBody))
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			fail(http.StatusRequestEntityTooLarge, codeTooLarge, "body_size")
+			x.fail(http.StatusRequestEntityTooLarge, codeTooLarge, "body_size")
 		} else {
-			fail(http.StatusBadRequest, codeInvalidRequest, "body_read")
+			x.fail(http.StatusBadRequest, codeInvalidRequest, "body_read")
 		}
-		return
+		release()
+		return "", nil, false
 	}
-	var req request
-	if err := strictjson.Decode(body, &req); err != nil || req.Pass == "" {
-		fail(http.StatusBadRequest, codeInvalidRequest, "body_json")
-		return
+	if err := strictjson.Decode(body, v); err != nil {
+		x.fail(http.StatusBadRequest, codeInvalidRequest, "body_json")
+		release()
+		return "", nil, false
 	}
-	a.add("repair", req.Repair)
+	return app, release, true
+}
 
-	// 4. Verify the pass for this application.
-	claims, err := s.cfg.Verifier.Verify(req.Pass, app)
-	if err != nil {
-		fail(http.StatusBadRequest, codeInvalidPass, passReason(err))
-		return
+// resolve looks up the tenant (by host or tenant ID) for app and checks
+// that it is enabled. It returns false if a response was sent.
+func (x *exchange) resolve(ctx context.Context, app, host, tenant string) (directory.Tenant, bool) {
+	var t directory.Tenant
+	var err error
+	if host != "" {
+		t, err = x.s.cfg.Directory.ByHost(ctx, host, app)
+	} else {
+		t, err = x.s.cfg.Directory.ByTenant(ctx, tenant, app)
 	}
-	a.add("jti", claims.ID)
-	key := "t:" + claims.Tenant
-	if claims.Host != "" {
-		a.add("host", claims.Host)
-		key = "h:" + claims.Host
+	switch {
+	case errors.Is(err, directory.ErrNotFound):
+		x.fail(http.StatusForbidden, codeDenied, "tenant_not_found")
+		return t, false
+	case err != nil:
+		x.failErr(http.StatusServiceUnavailable, codeUnavailable, "directory_error", err)
+		return t, false
 	}
+	x.a.add("tenant", t.ID)
+	x.a.add("node", t.Node)
+	x.a.add("account", t.Account)
+	if tenant != "" && tenant != t.ID {
+		// The directory must return the tenant it was asked for.
+		x.failErr(http.StatusServiceUnavailable, codeUnavailable, "directory_mismatch", nil)
+		return t, false
+	}
+	if !t.Enabled {
+		x.fail(http.StatusForbidden, codeDenied, "tenant_disabled")
+		return t, false
+	}
+	return t, true
+}
 
-	// 5. Rate limit distinct tenants per application.
-	if !s.cfg.Limiter.Allow(app, key) {
-		fail(http.StatusTooManyRequests, codeRateLimited, "distinct_tenants")
+func (s *Server) credentials(w http.ResponseWriter, r *http.Request) {
+	x := s.newExchange(w, r, "credential")
+	defer x.finish()
+
+	var req credentialsRequest
+	app, release, ok := x.begin("/v1/credentials", &req)
+	if !ok {
 		return
+	}
+	defer release()
+	if (req.Pass == "") == (req.Ticket == "") {
+		x.fail(http.StatusBadRequest, codeInvalidRequest, "pass_or_ticket")
+		return
+	}
+	x.a.add("repair", req.Repair)
+
+	// Verify the pass or ticket for this application, and apply the
+	// matching distinct-tenant rate limit.
+	var host, tenant string
+	if req.Pass != "" {
+		x.a.add("via", "pass")
+		claims, err := s.cfg.Verifier.Verify(req.Pass, app)
+		if err != nil {
+			x.fail(http.StatusBadRequest, codeInvalidPass, passReason(err))
+			return
+		}
+		x.a.add("jti", claims.ID)
+		host, tenant = claims.Host, claims.Tenant
+		key := "t:" + tenant
+		if host != "" {
+			x.a.add("host", host)
+			key = "h:" + host
+		}
+		if !s.cfg.Limiter.Allow(app, key) {
+			x.fail(http.StatusTooManyRequests, codeRateLimited, "distinct_tenants")
+			return
+		}
+	} else {
+		x.a.add("via", "ticket")
+		pol, allowed := s.cfg.JobPolicies[app]
+		if s.cfg.JobVerifier == nil || !allowed {
+			x.fail(http.StatusForbidden, codeDenied, "jobs_not_enabled")
+			return
+		}
+		claims, kid, err := s.cfg.JobVerifier.Verify(req.Ticket, app)
+		if err != nil {
+			x.fail(http.StatusBadRequest, codeInvalidTicket, "ticket_"+strings.TrimPrefix(passReason(err), "pass_"))
+			return
+		}
+		x.a.add("jti", claims.ID)
+		x.a.add("issuer", kid)
+		if !pol.Issuers[kid] {
+			x.fail(http.StatusForbidden, codeDenied, "issuer_not_allowed")
+			return
+		}
+		if claims.Expiry.Sub(claims.IssuedAt) > pol.MaxTTL {
+			x.fail(http.StatusBadRequest, codeInvalidTicket, "ticket_lifetime")
+			return
+		}
+		tenant = claims.Tenant
+		if !pol.Limiter.Allow(app, "t:"+tenant) {
+			x.fail(http.StatusTooManyRequests, codeRateLimited, "distinct_tenants_jobs")
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.IssueTimeout)
 	defer cancel()
 
-	// 6. Resolve the tenant.
-	var t directory.Tenant
-	if claims.Host != "" {
-		t, err = s.cfg.Directory.ByHost(ctx, claims.Host, app)
-	} else {
-		t, err = s.cfg.Directory.ByTenant(ctx, claims.Tenant, app)
-	}
-	switch {
-	case errors.Is(err, directory.ErrNotFound):
-		fail(http.StatusForbidden, codeDenied, "tenant_not_found")
-		return
-	case err != nil:
-		level = slog.LevelError
-		a.add("error", err.Error())
-		fail(http.StatusServiceUnavailable, codeUnavailable, "directory_error")
-		return
-	}
-	a.add("tenant", t.ID)
-	a.add("node", t.Node)
-	a.add("account", t.Account)
-	if claims.Tenant != "" && claims.Tenant != t.ID {
-		// The directory must return the tenant it was asked for.
-		level = slog.LevelError
-		fail(http.StatusServiceUnavailable, codeUnavailable, "directory_mismatch")
-		return
-	}
-	if !t.Enabled {
-		fail(http.StatusForbidden, codeDenied, "tenant_disabled")
+	t, ok := x.resolve(ctx, app, host, tenant)
+	if !ok {
 		return
 	}
 	node, ok := s.cfg.Nodes[t.Node]
 	if !ok {
-		level = slog.LevelError
-		fail(http.StatusServiceUnavailable, codeUnavailable, "unknown_node")
+		x.failErr(http.StatusServiceUnavailable, codeUnavailable, "unknown_node", nil)
 		return
 	}
-	a.add("store", node.Store.Type())
+	x.a.add("store", node.Store.Type())
 
-	// 7. Issue.
 	repair := req.Repair && s.allowRepair(t.Node+"/"+t.Account)
 	cred, err := node.Store.Issue(ctx, t.Account, repair)
 	if err != nil {
-		level = slog.LevelError
-		a.add("error", err.Error())
 		switch {
 		case errors.Is(err, store.ErrRefused):
 			// The directory points at an account the store refuses to
 			// manage. Either the directory or the store is misconfigured
 			// - or someone is trying something. Loud log, opaque answer.
-			fail(http.StatusForbidden, codeDenied, "account_refused")
+			x.failErr(http.StatusForbidden, codeDenied, "account_refused", err)
 		case errors.Is(err, store.ErrClockSkew):
-			fail(http.StatusServiceUnavailable, codeUnavailable, "clock_skew")
+			x.failErr(http.StatusServiceUnavailable, codeUnavailable, "clock_skew", err)
 		case errors.Is(err, context.DeadlineExceeded):
-			fail(http.StatusServiceUnavailable, codeUnavailable, "timeout")
+			x.failErr(http.StatusServiceUnavailable, codeUnavailable, "timeout", err)
 		default:
-			fail(http.StatusServiceUnavailable, codeUnavailable, "store_error")
+			x.failErr(http.StatusServiceUnavailable, codeUnavailable, "store_error", err)
 		}
 		return
 	}
-	a.add("window", cred.Window)
-	a.add("key_id", cred.KeyID)
-	a.add("changed", cred.Changed)
-	a.add("expires_at", cred.ExpiresAt.UTC().Format(time.RFC3339))
+	x.a.add("window", cred.Window)
+	x.a.add("key_id", cred.KeyID)
+	x.a.add("changed", cred.Changed)
+	x.a.add("expires_at", cred.ExpiresAt.UTC().Format(time.RFC3339))
 
-	result, level = "ok", slog.LevelInfo
+	x.result, x.level = "ok", slog.LevelInfo
 	writeJSON(w, http.StatusOK, response{
 		Tenant:    t.ID,
 		Store:     node.Store.Type(),
@@ -341,6 +456,77 @@ func (s *Server) credentials(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: cred.ExpiresAt.UTC().Format(time.RFC3339),
 		RefreshAt: cred.RefreshAt.UTC().Format(time.RFC3339),
 	})
+}
+
+// jobTickets exchanges a pass for a job ticket for the same tenant. The
+// ticket lets a job that runs after the request has finished obtain
+// credentials for that tenant (and only that tenant) until it expires.
+func (s *Server) jobTickets(w http.ResponseWriter, r *http.Request) {
+	x := s.newExchange(w, r, "job_ticket")
+	defer x.finish()
+
+	var req jobTicketRequest
+	app, release, ok := x.begin("/v1/job-tickets", &req)
+	if !ok {
+		return
+	}
+	defer release()
+	pol, allowed := s.cfg.JobPolicies[app]
+	if s.cfg.JobSigner == nil || !allowed || !pol.Issue {
+		x.fail(http.StatusForbidden, codeDenied, "job_issue_not_enabled")
+		return
+	}
+	if req.Pass == "" {
+		x.fail(http.StatusBadRequest, codeInvalidRequest, "body_json")
+		return
+	}
+	ttl := pol.MaxTTL
+	if req.TTL != "" {
+		d, err := time.ParseDuration(req.TTL)
+		if err != nil || d < time.Minute || d%time.Second != 0 {
+			x.fail(http.StatusBadRequest, codeInvalidRequest, "ttl")
+			return
+		}
+		ttl = min(d, pol.MaxTTL)
+	}
+
+	claims, err := s.cfg.Verifier.Verify(req.Pass, app)
+	if err != nil {
+		x.fail(http.StatusBadRequest, codeInvalidPass, passReason(err))
+		return
+	}
+	x.a.add("jti", claims.ID)
+	key := "t:" + claims.Tenant
+	if claims.Host != "" {
+		x.a.add("host", claims.Host)
+		key = "h:" + claims.Host
+	}
+	// Counted against the same per-application limit as credentials:
+	// exchanging passes for tickets must not be a way around it.
+	if !s.cfg.Limiter.Allow(app, key) {
+		x.fail(http.StatusTooManyRequests, codeRateLimited, "distinct_tenants")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.IssueTimeout)
+	defer cancel()
+	// Resolve now, so the ticket names the canonical tenant ID and is
+	// only issued for an enabled tenant this application may access.
+	t, ok := x.resolve(ctx, app, claims.Host, claims.Tenant)
+	if !ok {
+		return
+	}
+	now := time.Now()
+	jc := pass.JobClaims{Audience: app, Tenant: t.ID, IssuedAt: now, Expiry: now.Add(ttl)}
+	ticket, err := s.cfg.JobSigner.SignJob(ctx, jc)
+	if err != nil {
+		x.failErr(http.StatusServiceUnavailable, codeUnavailable, "sign_error", err)
+		return
+	}
+	exp := now.Add(ttl).UTC().Truncate(time.Second).Format(time.RFC3339)
+	x.a.add("expires_at", exp)
+	x.result, x.level = "ok", slog.LevelInfo
+	writeJSON(w, http.StatusOK, jobTicketResponse{Ticket: ticket, Tenant: t.ID, ExpiresAt: exp})
 }
 
 // passReason maps a verification error to an audit reason.

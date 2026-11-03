@@ -40,14 +40,17 @@
 package rotation
 
 import (
-	"crypto/hmac"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
+
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 )
 
 // Key is one rotation key.
@@ -55,9 +58,10 @@ type Key struct {
 	// ID names the key. It is mixed into the derivation, so changing the
 	// ID of a key changes all passwords derived from it.
 	ID string
-	// Secret is the HMAC key, at least MinSecretLength bytes of
-	// cryptographically random data.
-	Secret []byte
+	// MAC computes HMAC-SHA256 with the key material, which is held
+	// either in memory (kms.LocalMAC, at least MinSecretLength random
+	// bytes) or in a key management system (kms.TransitMAC).
+	MAC kms.MAC
 	// NotBefore is the first instant from which windows may use this key.
 	// Window n uses the key with the latest NotBefore <= Start(n).
 	// Distributing a new key with a NotBefore in the future lets every
@@ -79,6 +83,7 @@ type Schedule struct {
 	// DefaultMaxClockSkew.
 	MaxClockSkew time.Duration
 	keys         []Key // sorted by NotBefore ascending
+	cache        deriveCache
 }
 
 // DefaultMaxClockSkew is the default for Schedule.MaxClockSkew.
@@ -103,19 +108,19 @@ func NewSchedule(window, renewBefore time.Duration, keys []Key) (*Schedule, erro
 	ids := map[string]bool{}
 	secrets := map[string]bool{}
 	for i, k := range ks {
-		if len(k.Secret) < MinSecretLength {
-			return nil, fmt.Errorf("rotation: key %q is shorter than %d bytes", k.ID, MinSecretLength)
+		if k.MAC == nil {
+			return nil, fmt.Errorf("rotation: key %q has no key material", k.ID)
 		}
 		if ids[k.ID] {
 			return nil, fmt.Errorf("rotation: duplicate key ID %q", k.ID)
 		}
-		if secrets[string(k.Secret)] {
-			return nil, fmt.Errorf("rotation: key %q reuses another key's secret", k.ID)
+		if secrets[k.MAC.Fingerprint()] {
+			return nil, fmt.Errorf("rotation: key %q reuses another key's material", k.ID)
 		}
 		if i > 0 && k.NotBefore.Equal(ks[i-1].NotBefore) {
 			return nil, fmt.Errorf("rotation: keys %q and %q have the same not_before", ks[i-1].ID, k.ID)
 		}
-		ids[k.ID], secrets[string(k.Secret)] = true, true
+		ids[k.ID], secrets[k.MAC.Fingerprint()] = true, true
 	}
 	return &Schedule{Window: window, RenewBefore: renewBefore, keys: ks}, nil
 }
@@ -217,23 +222,45 @@ func (s *Schedule) keyFor(a Account, n int64) (Key, error) {
 }
 
 // derive computes HMAC(K, label || account || LP(keyID) || BE64(n)).
-func (s *Schedule) derive(label string, a Account, n int64) ([]byte, string, error) {
+//
+// Results are cached until the window has long ended: the value is a
+// pure function of its inputs, and with a remote key (Vault Transit) the
+// cache keeps the KMS off the hot path (MySQL and Redis recompute several
+// candidate windows per request). The cache holds derived passwords in
+// memory, which tenant-pass does anyway while serving a request; it is
+// bounded in size and never written anywhere.
+func (s *Schedule) derive(ctx context.Context, label string, a Account, n int64) ([]byte, string, error) {
 	k, err := s.keyFor(a, n)
 	if err != nil {
 		return nil, "", err
 	}
-	m := hmac.New(sha256.New, k.Secret)
-	m.Write([]byte(label))
-	m.Write(a.bytes())
-	m.Write(appendLP(nil, k.ID))
-	m.Write(binary.BigEndian.AppendUint64(nil, uint64(n)))
-	return m.Sum(nil), k.ID, nil
+	var msg []byte
+	msg = append(msg, label...)
+	msg = append(msg, a.bytes()...)
+	msg = appendLP(msg, k.ID)
+	msg = binary.BigEndian.AppendUint64(msg, uint64(n))
+
+	ck := string(msg)
+	if v, ok := s.cache.get(ck); ok {
+		return v, k.ID, nil
+	}
+	sum, err := k.MAC.MAC(ctx, msg)
+	if err != nil {
+		return nil, "", fmt.Errorf("rotation: key %q: %w", k.ID, err)
+	}
+	if len(sum) != sha256.Size {
+		return nil, "", errors.New("rotation: MAC returned wrong length")
+	}
+	// Keep until two windows after the window ends; long enough for the
+	// sweeper, short enough to bound memory.
+	s.cache.put(ck, sum, s.End(a, n).Add(2*s.Window))
+	return sum, k.ID, nil
 }
 
 // Password returns the password for account a in window n (43 characters
 // of base64url, 256 bits) and the ID of the key it was derived from.
-func (s *Schedule) Password(a Account, n int64) (string, string, error) {
-	sum, kid, err := s.derive("tenant-pass/v1/password", a, n)
+func (s *Schedule) Password(ctx context.Context, a Account, n int64) (string, string, error) {
+	sum, kid, err := s.derive(ctx, "tenant-pass/v1/password", a, n)
 	if err != nil {
 		return "", "", err
 	}
@@ -245,9 +272,55 @@ func (s *Schedule) Password(a Account, n int64) (string, string, error) {
 // MySQL caching_sha2_password) need every replica to produce the same
 // hash, so the salt cannot be random. It is still unique per account and
 // window, which is what a salt is for.
-func (s *Schedule) Salt(a Account, n int64) ([]byte, error) {
-	sum, _, err := s.derive("tenant-pass/v1/salt", a, n)
+func (s *Schedule) Salt(ctx context.Context, a Account, n int64) ([]byte, error) {
+	sum, _, err := s.derive(ctx, "tenant-pass/v1/salt", a, n)
 	return sum, err
+}
+
+// deriveCache is a small, bounded, expiring map.
+type deriveCache struct {
+	mu sync.Mutex
+	m  map[string]cacheEntry
+}
+
+type cacheEntry struct {
+	v   []byte
+	exp time.Time
+}
+
+// maxCacheEntries bounds the cache. At 2 values per account and window
+// and up to 4 windows, this covers several thousand active accounts.
+const maxCacheEntries = 50000
+
+func (c *deriveCache) get(k string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[k]
+	if !ok || time.Now().After(e.exp) {
+		return nil, false
+	}
+	// Return a copy: callers must not be able to corrupt cached values.
+	return append([]byte(nil), e.v...), true
+}
+
+func (c *deriveCache) put(k string, v []byte, exp time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = make(map[string]cacheEntry)
+	}
+	if len(c.m) >= maxCacheEntries {
+		now := time.Now()
+		for key, e := range c.m {
+			if now.After(e.exp) {
+				delete(c.m, key)
+			}
+		}
+		if len(c.m) >= maxCacheEntries {
+			clear(c.m) // still full: start over rather than grow
+		}
+	}
+	c.m[k] = cacheEntry{v: append([]byte(nil), v...), exp: exp}
 }
 
 // CheckCurrentKey returns an error if no key is in force right now (for

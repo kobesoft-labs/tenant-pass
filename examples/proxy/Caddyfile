@@ -1,0 +1,19 @@
+# Caddy in front of an application, with tenant-pass-gateway as forward-auth.
+# Tested with Caddy 2 (see docs/en/gateway.md).
+*.billing.example.com {
+	# route{} keeps the written order. Caddy's default directive order runs
+	# forward_auth before request_header, which would delete the pass the
+	# gateway just added.
+	route {
+		# 1. Never let a client supply its own pass.
+		request_header -Tenant-Pass
+		# 2. Ask the gateway; copy its pass (if any) onto the request.
+		forward_auth 127.0.0.1:9180 {
+			uri /
+			header_up Tenant-Pass-Gateway-Secret {env.TP_GATEWAY_SECRET}
+			copy_headers Tenant-Pass
+		}
+		# 3. Forward to the application.
+		reverse_proxy billing:8080
+	}
+}

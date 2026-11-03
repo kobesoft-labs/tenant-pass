@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -257,3 +258,11 @@ func TestProbes(t *testing.T) {
 		t.Errorf("draining readyz: %d", w.Code)
 	}
 }
+
+func httptestRequest(path string, body io.Reader) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, path, body)
+	r.Header.Set("Content-Type", "application/json")
+	return r
+}
+
+func newRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }

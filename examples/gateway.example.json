@@ -1,0 +1,35 @@
+{
+  "listen": "127.0.0.1:9180",
+  "insecure_plaintext_http": true,
+  "caller_secret_file": "/run/secrets/gateway-caller-secret",
+
+  "kms": {
+    "vault": {
+      "address": "https://vault.internal:8200",
+      "token_file": "/run/vault/token",
+      "tls": {"ca_file": "/etc/tenant-pass-gateway/vault-ca.pem"}
+    }
+  },
+  "signing_key": {"id": "gw-2026-11", "transit": {"key": "tenant-pass-gateway", "version": 1}},
+
+  "identity": {
+    "issuer": "https://login.example.com/",
+    "audiences": ["tenant-apps"],
+    "jwks_url": "https://login.example.com/.well-known/jwks.json",
+    "algorithms": ["RS256", "ES256", "EdDSA"],
+    "authorization_header": true,
+    "cookie": "session",
+    "tenant_claim": "tenant_id",
+    "leeway": "30s"
+  },
+
+  "routes": [
+    {"host": "{tenant}.billing.example.com", "app": "billing"},
+    {"host": "shop.acme-corp.com", "app": "billing", "tenant": "acme"},
+    {"host": "app.example.com", "app": "crm", "tenant_from_token": true}
+  ],
+  "unauthenticated": "pass_through",
+  "pass": {"ttl": "30s", "header": "Tenant-Pass"},
+  "request": {"host_header": "X-Forwarded-Host"},
+  "log_level": "info"
+}

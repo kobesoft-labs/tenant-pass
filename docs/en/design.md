@@ -8,13 +8,19 @@ This document explains how tenant-pass works and why it is built the way it is. 
 
 | Component | Holds | Role |
 | --- | --- | --- |
-| **Gateway** (yours: Caddy, nginx, Envoy, an API gateway, a login service) | Gateway Ed25519 **private** key | Authenticates the end user's session for a tenant, then signs a short-lived pass naming the tenant and the application it forwards the request to. |
+| **Gateway** (`tenant-pass-gateway` behind your proxy, or your own component) | Gateway Ed25519 **private** key | Authenticates the end user's session for a tenant, then signs a short-lived pass naming the tenant and the application it forwards the request to. See [gateway.md](gateway.md). |
+| **Job issuer** (optional, yours: a scheduler) | Issuer Ed25519 private key | Signs job tickets for scheduled work that no request starts. See [jobs.md](jobs.md). |
+| **KMS** (optional: Vault / OpenBao) | Rotation and signing keys | Computes HMACs and signatures so keys never leave it. See [kms.md](kms.md). |
 | **Application** (yours) | Its own app token (and/or client certificate) | Receives the request and the pass, exchanges the pass for a tenant credential, connects to the tenant's database. |
 | **tenant-pass** | Gateway **public** keys, app token hashes, rotation keys, store admin credentials | Verifies the app and the pass, resolves the tenant, sets and returns the credential. |
 | **Directory** (static config, or your PostgreSQL/MySQL) | Tenant → node, account, enabled, allowed apps | Source of truth for which account belongs to which tenant. |
 | **Stores** (PostgreSQL, MySQL, Redis) | Tenant accounts | Enforce the passwords tenant-pass sets. |
 
 The private gateway key and the rotation keys never meet: the gateway can sign passes but cannot derive passwords, and tenant-pass can derive passwords but cannot sign passes. An application has neither.
+
+## Background jobs
+
+Passes live for seconds. Work that runs later uses **job tickets**: PASETO tokens with a separate implicit assertion (`tenant-pass/v1/job`), always naming a tenant ID, living up to `job_tickets.max_ttl`. tenant-pass issues them in exchange for a pass (`POST /v1/job-tickets`, opt-in per application), and accepts tickets from trusted issuers you run (schedulers). Redemption goes through the same directory and store checks as passes, with a separate rate limit. Details: [jobs.md](jobs.md).
 
 ## Request flow
 

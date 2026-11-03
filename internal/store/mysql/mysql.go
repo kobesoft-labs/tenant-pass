@@ -196,7 +196,7 @@ func (s *Store) Issue(ctx context.Context, user string, repair bool) (store.Cred
 				return err
 			}
 		}
-		cred, err = store.Build(s.sched, acc, plan.Issue, plan.Change)
+		cred, err = store.Build(ctx, s.sched, acc, plan.Issue, plan.Change)
 		return err
 	})
 	return cred, err
@@ -366,13 +366,13 @@ func (s *Store) inspect(ctx context.Context, conn *sql.Conn, user string) (state
 			return -1, nil
 		}
 		for _, n := range cands {
-			pw, _, err := s.sched.Password(acc, n)
+			pw, _, err := s.sched.Password(ctx, acc, n)
 			if err != nil {
 				continue // no key for that window
 			}
 			// Cheap pre-check: our salt for window n is deterministic, so
 			// only run the (slow) hash when the stored salt matches.
-			saltSrc, err := s.sched.Salt(acc, n)
+			saltSrc, err := s.sched.Salt(ctx, acc, n)
 			if err != nil {
 				continue
 			}
@@ -480,11 +480,11 @@ func (s *Store) privileged(ctx context.Context, conn *sql.Conn, user, host strin
 func (s *Store) apply(ctx context.Context, conn *sql.Conn, user string, st state, keep []int64, force bool) error {
 	acc := s.account(user)
 	hashFor := func(n int64) (string, error) {
-		pw, _, err := s.sched.Password(acc, n)
+		pw, _, err := s.sched.Password(ctx, acc, n)
 		if err != nil {
 			return "", err
 		}
-		src, err := s.sched.Salt(acc, n)
+		src, err := s.sched.Salt(ctx, acc, n)
 		if err != nil {
 			return "", err
 		}

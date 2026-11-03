@@ -16,4 +16,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Application authentication by bearer token hash and/or client certificate URI SAN.
 - Distinct-tenant rate limit per application; repair rate limit; concurrency limit.
 - Commands: `serve`, `check-config`, `gen-gateway-key`, `gen-rotation-key`, `gen-app-token`, `sign-pass`, `version`.
+- Job tickets (`tenant-pass/v1/job`): `POST /v1/job-tickets` (opt-in per application) and trusted external issuers for scheduled work; `sign-job-ticket` and `gen-signing-key` commands.
+- Key management through HashiCorp Vault / OpenBao Transit: rotation keys (HMAC, version-pinned), job ticket signing key and gateway signing key (Ed25519, verified locally).
+- `tenant-pass-gateway`: forward-auth gateway for Caddy, nginx, Traefik and Envoy. Verifies identity-provider JWTs (JWKS, asymmetric algorithms only) and signs passes only for the user's own tenant.
 - Documentation in English and Japanese.

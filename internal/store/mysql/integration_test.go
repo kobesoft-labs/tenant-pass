@@ -22,6 +22,7 @@ import (
 
 	mysqldrv "github.com/go-sql-driver/mysql"
 
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 	"github.com/kobesoft-labs/tenant-pass/internal/netcfg"
 	"github.com/kobesoft-labs/tenant-pass/internal/rotation"
 	"github.com/kobesoft-labs/tenant-pass/internal/secret"
@@ -122,7 +123,7 @@ func setup(t *testing.T) (*Store, *rotation.Schedule) {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
-	sched, err := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", Secret: []byte("0123456789abcdef0123456789abcdeY")}})
+	sched, err := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", MAC: kms.NewLocalMAC([]byte("0123456789abcdef0123456789abcdeY"))}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -37,6 +37,7 @@
 package pass
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -169,21 +170,44 @@ func NewID() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// Signer creates passes. It is used by gateways (and by tests).
+// Signer creates passes (and, via SignJob, job tickets).
+//
+// Set either Key (a local private key) or Remote (a signing function
+// backed by a key management system such as Vault Transit).
 type Signer struct {
 	KeyID string
 	Key   ed25519.PrivateKey
+	// Remote signs msg with an Ed25519 key held elsewhere. It must return
+	// a 64-byte signature.
+	Remote func(ctx context.Context, msg []byte) ([]byte, error)
+}
+
+func (s Signer) sign(ctx context.Context, m []byte, assertion string) (string, error) {
+	if !NamePattern.MatchString(s.KeyID) {
+		return "", errors.New("pass: invalid key ID")
+	}
+	f, err := json.Marshal(footer{Kid: s.KeyID})
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case s.Remote != nil && s.Key == nil:
+		return paseto.SignWith(func(msg []byte) ([]byte, error) { return s.Remote(ctx, msg) }, m, f, []byte(assertion))
+	case s.Remote == nil && len(s.Key) == ed25519.PrivateKeySize:
+		return paseto.Sign(s.Key, m, f, []byte(assertion))
+	default:
+		return "", errors.New("pass: set exactly one of Key and Remote")
+	}
 }
 
 // Sign returns a signed pass for c. IssuedAt and Expiry are truncated to
 // whole seconds. If c.ID is empty a random one is generated.
 func (s Signer) Sign(c Claims) (string, error) {
-	if !NamePattern.MatchString(s.KeyID) {
-		return "", errors.New("pass: invalid key ID")
-	}
-	if len(s.Key) != ed25519.PrivateKeySize {
-		return "", errors.New("pass: invalid private key")
-	}
+	return s.SignContext(context.Background(), c)
+}
+
+// SignContext is Sign with a context for remote signers.
+func (s Signer) SignContext(ctx context.Context, c Claims) (string, error) {
 	c.IssuedAt = c.IssuedAt.UTC().Truncate(time.Second)
 	c.Expiry = c.Expiry.UTC().Truncate(time.Second)
 	if c.ID == "" {
@@ -199,11 +223,62 @@ func (s Signer) Sign(c Claims) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	f, err := json.Marshal(footer{Kid: s.KeyID})
-	if err != nil {
-		return "", err
+	return s.sign(ctx, m, ImplicitAssertion)
+}
+
+// verifyToken performs the checks shared by passes and job tickets:
+// length, footer, key lookup by kid, and signature under the given
+// implicit assertion. It returns the authenticated message and the key
+// ID. Nothing derived from unauthenticated data is used, except the key
+// ID to select a key.
+func verifyToken(token, assertion string, keys map[string]ed25519.PublicKey) ([]byte, string, error) {
+	if len(token) > MaxLength {
+		return nil, "", ErrMalformed
 	}
-	return paseto.Sign(s.Key, m, f, []byte(ImplicitAssertion))
+	rawFooter, err := paseto.Footer(token)
+	if err != nil || len(rawFooter) == 0 || len(rawFooter) > 256 {
+		return nil, "", ErrMalformed
+	}
+	var f footer
+	if err := strictjson.Decode(rawFooter, &f); err != nil || !NamePattern.MatchString(f.Kid) {
+		return nil, "", ErrMalformed
+	}
+	key, ok := keys[f.Kid]
+	if !ok {
+		return nil, "", ErrUnknownKey
+	}
+	m, _, err := paseto.Verify(key, token, []byte(assertion))
+	switch {
+	case errors.Is(err, paseto.ErrSignature):
+		return nil, "", ErrSignature
+	case err != nil:
+		return nil, "", ErrMalformed
+	}
+	return m, f.Kid, nil
+}
+
+// checkTimes applies the lifetime and time-window rules.
+func checkTimes(iat, exp time.Time, maxTTL, hardMax, defMax, leeway time.Duration, now func() time.Time) error {
+	if maxTTL <= 0 {
+		maxTTL = defMax
+	}
+	if maxTTL > hardMax {
+		maxTTL = hardMax
+	}
+	if leeway <= 0 {
+		leeway = DefaultLeeway
+	}
+	if exp.Sub(iat) > maxTTL {
+		return fmt.Errorf("%w: lifetime too long", ErrClaims)
+	}
+	if now == nil {
+		now = time.Now
+	}
+	t := now()
+	if !t.Before(exp) || iat.After(t.Add(leeway)) {
+		return ErrExpired
+	}
+	return nil
 }
 
 // Verifier verifies passes. The zero value is not usable; set Keys.
@@ -228,38 +303,11 @@ type Verifier struct {
 //   - the claims match the schema exactly,
 //   - aud equals audience (the authenticated caller),
 //   - iat <= now + Leeway, now < exp, and exp - iat <= MaxTTL.
-//
-// Checks are ordered so that nothing derived from unauthenticated data is
-// used, except the key ID, before the signature has been verified.
 func (v *Verifier) Verify(p, audience string) (Claims, error) {
-	if len(p) > MaxLength {
-		return Claims{}, ErrMalformed
+	m, _, err := verifyToken(p, ImplicitAssertion, v.Keys)
+	if err != nil {
+		return Claims{}, err
 	}
-
-	// 1. Read the (still unauthenticated) footer only to choose a key.
-	rawFooter, err := paseto.Footer(p)
-	if err != nil || len(rawFooter) == 0 || len(rawFooter) > 256 {
-		return Claims{}, ErrMalformed
-	}
-	var f footer
-	if err := strictjson.Decode(rawFooter, &f); err != nil || !NamePattern.MatchString(f.Kid) {
-		return Claims{}, ErrMalformed
-	}
-	key, ok := v.Keys[f.Kid]
-	if !ok {
-		return Claims{}, ErrUnknownKey
-	}
-
-	// 2. Verify the signature. Everything below is authenticated.
-	m, _, err := paseto.Verify(key, p, []byte(ImplicitAssertion))
-	switch {
-	case errors.Is(err, paseto.ErrSignature):
-		return Claims{}, ErrSignature
-	case err != nil:
-		return Claims{}, ErrMalformed
-	}
-
-	// 3. Parse claims strictly.
 	var w wireClaims
 	if err := strictjson.Decode(m, &w); err != nil {
 		return Claims{}, fmt.Errorf("%w: %v", ErrClaims, err)
@@ -274,33 +322,11 @@ func (v *Verifier) Verify(p, audience string) (Claims, error) {
 	if err := c.validate(); err != nil {
 		return Claims{}, err
 	}
-
-	// 4. Lifetime and time window.
-	maxTTL := v.MaxTTL
-	if maxTTL <= 0 {
-		maxTTL = DefaultMaxTTL
+	if err := checkTimes(c.IssuedAt, c.Expiry, v.MaxTTL, HardMaxTTL, DefaultMaxTTL, v.Leeway, v.Now); err != nil {
+		return Claims{}, err
 	}
-	if maxTTL > HardMaxTTL {
-		maxTTL = HardMaxTTL
-	}
-	leeway := v.Leeway
-	if leeway <= 0 {
-		leeway = DefaultLeeway
-	}
-	if c.Expiry.Sub(c.IssuedAt) > maxTTL {
-		return Claims{}, fmt.Errorf("%w: lifetime too long", ErrClaims)
-	}
-	now := time.Now
-	if v.Now != nil {
-		now = v.Now
-	}
-	t := now()
-	if !t.Before(c.Expiry) || c.IssuedAt.After(t.Add(leeway)) {
-		return Claims{}, ErrExpired
-	}
-
-	// 5. Audience. Checked last so that a pass for another application
-	// is only reported as such once it is known to be genuine.
+	// Audience is checked last so that a pass for another application is
+	// only reported as such once it is known to be genuine.
 	if c.Audience != audience {
 		return Claims{}, ErrAudience
 	}

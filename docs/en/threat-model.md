@@ -41,7 +41,9 @@ An attacker gains code execution in an application process (RCE, a malicious dep
 | Reuse passes the application legitimately received | Works, but only for those tenants and only until `exp` (seconds). |
 | Read credentials other workers of the same application received | Works for tenants with live credentials in that process's memory: only tenants actively being served. Credentials expire within one window. |
 | Read stored tenant passwords | Nothing is stored. |
-| Make the gateway forward requests for many tenants to it | See "Residual risk: the gateway" below. Bounded by the distinct-tenant rate limit. |
+| Make the gateway forward requests for many tenants to it | See "Residual risk: the gateway" below. Bounded by the distinct-tenant rate limit. With tenant-pass-gateway, impossible without a valid user session for each tenant. |
+| Turn passes into longer-lived job tickets | Only if the application has `jobs.issue`; limited to tenants it legitimately received passes for, and to `jobs.max_ttl`. |
+| Sign its own job tickets | Not possible: issuer keys belong to tenant-pass and to separately run schedulers. |
 | Point tenant-pass at an admin account | Not possible from the application: the directory decides the account, and the store refuses privileged and unmanaged accounts. |
 
 So a compromised application exposes **tenants that are actively used while the attacker is present**, at a rate bounded by `limits.max_tenants_per_minute`, instead of all tenants at once. Detection (audit log volume, `rate_limited` events) buys time to respond.
@@ -68,11 +70,23 @@ tenant-pass holds rotation keys and store admin credentials. Its compromise expo
 - Restrict network access to it to the applications that need it.
 - Keep the rotation keys only in tenant-pass's secret mounts.
 
+### Compromised job issuer (scheduler)
+
+A trusted issuer can sign tickets for any tenant and any application that has `jobs`. It is as sensitive as a gateway key. Run it separately from applications, keep its key in Vault Transit if possible, and remove it from `trusted_issuers` to revoke it.
+
+### Session token replay by a compromised application
+
+Behind tenant-pass-gateway, the application receives the user's session cookie or token like any web application. A compromised application can replay it to obtain passes for every tenant in that user's tenant claim, until the token expires. This is bounded by the user's own tenants and the token lifetime, not by "all tenants". See [gateway.md](gateway.md#residual-risks) for mitigations.
+
+### Compromised identity provider
+
+tenant-pass-gateway trusts tokens signed by your identity provider. Whoever controls the provider (or its signing keys) can create sessions for any tenant. This is outside tenant-pass's protection, as it is for every other system that relies on that provider.
+
 ### Leaked rotation key
 
 Whoever holds a rotation key can compute every password derived from it **offline**, for every past and future window in which it is in force, without contacting tenant-pass. They still need network access to the stores. Response: rotate the key immediately (see [operations.md](operations.md#rotation-key-rotation)); after one window all old passwords are invalid (PostgreSQL by `VALID UNTIL`, MySQL/Redis by the sweeper and by issuance).
 
-Future work: delegating HMAC to a KMS/HSM so that the key cannot be exfiltrated.
+With rotation keys in Vault / OpenBao Transit ([kms.md](kms.md)), the key cannot be copied: an attacker on the host can derive passwords only while they keep access to the host and its Vault token.
 
 ### Leaked gateway key
 

@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 	"github.com/kobesoft-labs/tenant-pass/internal/rotation"
 )
 
 func TestDecide(t *testing.T) {
-	s, _ := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", Secret: make([]byte, 32)}})
+	s, _ := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", MAC: kms.NewLocalMAC(make([]byte, 32))}})
 	a := rotation.Account{Store: Type, Node: "pg1", Name: "t_acme"}
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	tgt := s.Target(a, now)

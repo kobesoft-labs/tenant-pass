@@ -59,3 +59,5 @@ jobs:
           go test -run=NONE -fuzz=FuzzVerify -fuzztime=60s ./internal/paseto
           go test -run=NONE -fuzz=FuzzVerify -fuzztime=60s ./pass
           go test -run=NONE -fuzz=FuzzDecode -fuzztime=60s ./internal/strictjson
+          go test -run=NONE -fuzz=FuzzJobVerify -fuzztime=60s ./pass
+          go test -run=NONE -fuzz=FuzzHostMatch -fuzztime=60s ./internal/gateway

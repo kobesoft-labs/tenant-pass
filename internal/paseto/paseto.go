@@ -104,7 +104,21 @@ func Sign(sk ed25519.PrivateKey, m, f, i []byte) (string, error) {
 	if len(sk) != ed25519.PrivateKeySize {
 		return "", errors.New("paseto: invalid private key size")
 	}
-	sig := ed25519.Sign(sk, pae([]byte(header), m, f, i))
+	return SignWith(func(msg []byte) ([]byte, error) { return ed25519.Sign(sk, msg), nil }, m, f, i)
+}
+
+// SignWith is Sign with the Ed25519 signing operation supplied by the
+// caller, for keys held in a key management system. sign receives the
+// exact bytes to sign (the PAE encoding) and must return a 64-byte
+// Ed25519 signature.
+func SignWith(sign func(msg []byte) ([]byte, error), m, f, i []byte) (string, error) {
+	sig, err := sign(pae([]byte(header), m, f, i))
+	if err != nil {
+		return "", err
+	}
+	if len(sig) != ed25519.SignatureSize {
+		return "", errors.New("paseto: signer returned a signature of the wrong size")
+	}
 
 	body := make([]byte, 0, len(m)+len(sig))
 	body = append(body, m...)

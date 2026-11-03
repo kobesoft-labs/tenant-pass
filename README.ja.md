@@ -58,6 +58,9 @@ tenant-pass を使うと、次のようになります。
 | ローテーション時の重複期間 | なし（クライアントが 1 回リトライ） | 新旧どちらも有効 | 新旧どちらも有効 |
 | 「管理対象」マーカー | グループロールへのメンバーシップ | マーカーロールの付与 | マーカーチャネルルール |
 
+- **すぐに使えるゲートウェイ**: `tenant-pass-gateway` は Caddy、nginx、Traefik、Envoy に forward-auth として組み込め、利用者の ID プロバイダーのセッショントークン（JWT/OIDC）を検証し、ユーザー自身のテナントに対してのみパスに署名します。
+- **バックグラウンドジョブ**: ジョブチケットにより、キューに入れられた処理やスケジュールされた処理が、パスの寿命を延ばすことなく、後から 1 つのテナントの認証情報を取得できます。
+- **KMS 内の鍵**: ローテーション鍵と署名鍵を HashiCorp Vault / OpenBao Transit に保管できるため、侵害されたホストから鍵をコピーされることはありません。
 - ステートレス: ロードバランサーの背後で任意の数のレプリカを実行できます。すべてのレプリカが同一のパスワードを導出します。
 - テナントディレクトリ: 静的（設定ファイル内）、または PostgreSQL / MySQL 上の独自の SQL クエリ。
 - パス形式: ドメイン分離を施した PASETO v4.public（Ed25519）。PASETO ライブラリがある言語であれば、どの言語でもゲートウェイを実装できます。
@@ -70,6 +73,7 @@ tenant-pass を使うと、次のようになります。
 
 ```sh
 go install github.com/kobesoft-labs/tenant-pass/cmd/tenant-pass@latest
+go install github.com/kobesoft-labs/tenant-pass/cmd/tenant-pass-gateway@latest   # optional ready-made gateway
 
 # Gateway key pair (the private key belongs to the gateway only)
 tenant-pass gen-gateway-key -private gw.key -public gw.pub
@@ -123,7 +127,10 @@ curl -s https://tenant-pass.internal:8443/v1/credentials \
 | [パスワード導出](docs/ja/derivation.md) | ウィンドウとパスワード導出の仕様およびテストベクター |
 | [設定](docs/ja/configuration.md) | すべての設定キー |
 | [PostgreSQL](docs/ja/stores/postgres.md) · [MySQL](docs/ja/stores/mysql.md) · [Redis](docs/ja/stores/redis.md) | 最小権限によるストアのセットアップ |
-| [ゲートウェイ連携](docs/ja/gateway-integration.md) | パスを正しく署名する方法 |
+| [tenant-pass-gateway](docs/ja/gateway.md) | forward-auth ゲートウェイコンポーネントと、Caddy/nginx/Traefik/Envoy の設定 |
+| [ゲートウェイ連携](docs/ja/gateway-integration.md) | 独自のゲートウェイでパスに署名するためのルール |
+| [バックグラウンドジョブ](docs/ja/jobs.md) | キューに入れられた処理やスケジュールされた処理のためのジョブチケット |
+| [鍵管理](docs/ja/kms.md) | 鍵を Vault / OpenBao Transit に保管する |
 | [クライアント連携](docs/ja/client-integration.md) | アプリケーションが認証情報を取得・キャッシュ・更新する方法 |
 | [運用](docs/ja/operations.md) | デプロイ、鍵のローテーション、監視、インシデント対応 |
 
@@ -137,4 +144,4 @@ tenant-pass は **1.0 未満** です。パス形式と導出方式はバージ�
 
 ## ライセンス
 
-Apache License 2.0。[LICENSE](LICENSE) を参照してください。
+Copyright 2026 KOBESOFT, Inc. Apache License 2.0 で提供します。[LICENSE](LICENSE) と [NOTICE](NOTICE) を参照してください。

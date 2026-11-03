@@ -4,6 +4,8 @@
 
 The gateway is the component that decides which requests deserve a pass. **The security of tenant-pass depends on this decision.** Read the [threat model](threat-model.md#residual-risk-the-gateway) first.
 
+tenant-pass ships a ready-made gateway, [tenant-pass-gateway](gateway.md), which follows every rule below. This page is for building passes into a component of your own.
+
 ## The rule
 
 > Sign a pass for tenant T and application A **only** when the gateway itself has verified that the request is authorized for tenant T — an authenticated user session that belongs to T, or a signed job authorization for T — and the gateway is forwarding that request to A.
@@ -30,11 +32,7 @@ A pass is not a routing hint. It is a capability: "you may obtain tenant T's cre
 
 ## Background jobs
 
-Requests that are not caused by an end user (queues, cron, migrations) have no session for the gateway to check. Options, from most to least preferable:
-
-1. **Pass at enqueue time is not enough.** A pass lives seconds; jobs run later. Do not stretch `max_ttl` for jobs.
-2. **A job authorizer** that you operate, separate from the applications, which signs passes for jobs it has authorized (for example a scheduler that knows which tenants have a scheduled report). Configure it as another gateway key with its own `kid`, so its passes can be told apart and its key revoked independently.
-3. Run jobs inside a separate application identity (`aud`) with a lower `max_tenants_per_minute`.
+Requests that are not caused by an end user (queues, cron, migrations) have no session for the gateway to check. Do not stretch pass lifetimes for them: use [job tickets](jobs.md).
 
 ## Key rotation
 

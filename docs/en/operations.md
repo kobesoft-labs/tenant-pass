@@ -72,6 +72,9 @@ All events are JSON lines on stdout. Useful alerts:
 | `reason=clock_skew` | A replica's clock differs from a store server's clock by more than `max_clock_skew`. That replica refuses writes; fix NTP (on the replica or the database). |
 | `reason=directory_error` / `store_error` / `timeout` | Backend problems. |
 | `msg=sweep` at `ERROR` | MySQL/Redis sweeps failing: expired passwords are not being removed. |
+| `reason=distinct_tenants_jobs` | A job workload is touching more tenants than its budget. |
+| `msg=job_ticket` volume per `app` | Tickets issued; alert on unusual volume. |
+| `error` containing `kms` | Vault/OpenBao unreachable or refusing: uncached passwords cannot be derived. |
 | Rate of `result=ok` per `app` | Baseline per application; alert on deviations. |
 | `/readyz` failing | Backend unreachable or replica draining. |
 
@@ -81,6 +84,9 @@ All events are JSON lines on stdout. Useful alerts:
 | --- | --- |
 | Application | Remove its `apps` entry (or replace its token hash) and roll out: it can no longer obtain credentials. Credentials it already holds expire within one window (MySQL/Redis: plus one sweep). Review `msg=credential` for that `app` to see which tenants it accessed. |
 | Gateway key | Remove the key from `gateway_keys`, roll out, deploy a new key to the gateway. |
+| Job issuer (scheduler) key | Remove it from `job_tickets.trusted_issuers` and roll out; tickets it signed stop working immediately. |
+| tenant-pass's own job key | Replace `job_tickets.signing_key` (new `id`) and roll out; outstanding tickets stop working, jobs must obtain new ones. |
+| Vault token | Revoke it in Vault; the host can no longer use the keys. |
 | Rotation key | See "Emergency" above. Also review store logs for logins from unexpected addresses. |
 | tenant-pass host | Treat all tenants as exposed: rotate rotation keys, store admin passwords, the TLS key; review store logs. |
 | Store admin password | Change it in the store and in the secret file; restart replicas. |

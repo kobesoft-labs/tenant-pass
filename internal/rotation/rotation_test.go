@@ -1,9 +1,12 @@
 package rotation
 
 import (
+	"context"
 	"encoding/hex"
 	"testing"
 	"time"
+
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 )
 
 func testSecret() []byte {
@@ -16,7 +19,7 @@ func testSecret() []byte {
 
 func testSchedule(t *testing.T) *Schedule {
 	t.Helper()
-	s, err := NewSchedule(15*time.Minute, 5*time.Minute, []Key{{ID: "k1", Secret: testSecret(), NotBefore: time.Unix(0, 0)}})
+	s, err := NewSchedule(15*time.Minute, 5*time.Minute, []Key{{ID: "k1", MAC: kms.NewLocalMAC(testSecret()), NotBefore: time.Unix(0, 0)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,11 +49,11 @@ func TestVectors(t *testing.T) {
 		if got := s.Start(c.acc, n).Unix(); got != c.start {
 			t.Errorf("%v: start = %d, want %d", c.acc, got, c.start)
 		}
-		pw, kid, err := s.Password(c.acc, n)
+		pw, kid, err := s.Password(context.Background(), c.acc, n)
 		if err != nil || pw != c.password || kid != "k1" {
 			t.Errorf("%v: password = %q %q %v", c.acc, pw, kid, err)
 		}
-		salt, _ := s.Salt(c.acc, n)
+		salt, _ := s.Salt(context.Background(), c.acc, n)
 		if hex.EncodeToString(salt) != c.salt {
 			t.Errorf("%v: salt = %x", c.acc, salt)
 		}
@@ -122,12 +125,12 @@ func TestOffsetsDiffer(t *testing.T) {
 func TestDomainSeparation(t *testing.T) {
 	s := testSchedule(t)
 	n := int64(100)
-	p1, _, _ := s.Password(Account{"postgres", "n", "u"}, n)
-	p2, _, _ := s.Password(Account{"mysql", "n", "u"}, n)
-	p3, _, _ := s.Password(Account{"postgres", "n", "u"}, n+1)
+	p1, _, _ := s.Password(context.Background(), Account{"postgres", "n", "u"}, n)
+	p2, _, _ := s.Password(context.Background(), Account{"mysql", "n", "u"}, n)
+	p3, _, _ := s.Password(context.Background(), Account{"postgres", "n", "u"}, n+1)
 	// Length prefixes: ("ab","c") must differ from ("a","bc").
-	p4, _, _ := s.Password(Account{"postgres", "ab", "c"}, n)
-	p5, _, _ := s.Password(Account{"postgres", "a", "bc"}, n)
+	p4, _, _ := s.Password(context.Background(), Account{"postgres", "ab", "c"}, n)
+	p5, _, _ := s.Password(context.Background(), Account{"postgres", "a", "bc"}, n)
 	if p1 == p2 || p1 == p3 || p4 == p5 {
 		t.Fatal("derivation inputs are not separated")
 	}
@@ -138,8 +141,8 @@ func TestKeyRotation(t *testing.T) {
 	k2 := make([]byte, 32)
 	k2[0] = 0xff
 	s, err := NewSchedule(15*time.Minute, 5*time.Minute, []Key{
-		{ID: "k2", Secret: k2, NotBefore: switchAt},
-		{ID: "k1", Secret: testSecret(), NotBefore: time.Unix(0, 0)},
+		{ID: "k2", MAC: kms.NewLocalMAC(k2), NotBefore: switchAt},
+		{ID: "k1", MAC: kms.NewLocalMAC(testSecret()), NotBefore: time.Unix(0, 0)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -147,17 +150,17 @@ func TestKeyRotation(t *testing.T) {
 	a := Account{"postgres", "pg1", "t_acme"}
 	n := s.Index(a, switchAt)
 	// The window that contains switchAt started before it: still k1.
-	if _, kid, _ := s.Password(a, n); kid != "k1" {
+	if _, kid, _ := s.Password(context.Background(), a, n); kid != "k1" {
 		t.Errorf("window containing switch uses %s", kid)
 	}
 	// The first window starting at or after switchAt uses k2.
-	if _, kid, _ := s.Password(a, n+1); kid != "k2" {
+	if _, kid, _ := s.Password(context.Background(), a, n+1); kid != "k2" {
 		t.Errorf("next window uses %s", kid)
 	}
 }
 
 func TestNewScheduleValidation(t *testing.T) {
-	good := []Key{{ID: "k1", Secret: testSecret()}}
+	good := []Key{{ID: "k1", MAC: kms.NewLocalMAC(testSecret())}}
 	bad := []struct {
 		name       string
 		window, rb time.Duration
@@ -168,10 +171,10 @@ func TestNewScheduleValidation(t *testing.T) {
 		{"renew too big", 10 * time.Minute, 6 * time.Minute, good},
 		{"renew zero", 10 * time.Minute, 0, good},
 		{"no keys", 10 * time.Minute, time.Minute, nil},
-		{"short key", 10 * time.Minute, time.Minute, []Key{{ID: "k", Secret: make([]byte, 31)}}},
-		{"dup id", 10 * time.Minute, time.Minute, []Key{{ID: "k", Secret: testSecret()}, {ID: "k", Secret: make([]byte, 32), NotBefore: time.Unix(1, 0)}}},
-		{"dup secret", 10 * time.Minute, time.Minute, []Key{{ID: "a", Secret: testSecret()}, {ID: "b", Secret: testSecret(), NotBefore: time.Unix(1, 0)}}},
-		{"same not_before", 10 * time.Minute, time.Minute, []Key{{ID: "a", Secret: testSecret()}, {ID: "b", Secret: make([]byte, 32)}}},
+		{"no key material", 10 * time.Minute, time.Minute, []Key{{ID: "k", MAC: nil}}},
+		{"dup id", 10 * time.Minute, time.Minute, []Key{{ID: "k", MAC: kms.NewLocalMAC(testSecret())}, {ID: "k", MAC: kms.NewLocalMAC(make([]byte, 32)), NotBefore: time.Unix(1, 0)}}},
+		{"dup secret", 10 * time.Minute, time.Minute, []Key{{ID: "a", MAC: kms.NewLocalMAC(testSecret())}, {ID: "b", MAC: kms.NewLocalMAC(testSecret()), NotBefore: time.Unix(1, 0)}}},
+		{"same not_before", 10 * time.Minute, time.Minute, []Key{{ID: "a", MAC: kms.NewLocalMAC(testSecret())}, {ID: "b", MAC: kms.NewLocalMAC(make([]byte, 32))}}},
 	}
 	for _, b := range bad {
 		if _, err := NewSchedule(b.window, b.rb, b.keys); err == nil {
@@ -182,11 +185,11 @@ func TestNewScheduleValidation(t *testing.T) {
 
 func TestCheckCurrentKey(t *testing.T) {
 	now := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
-	s, _ := NewSchedule(15*time.Minute, 5*time.Minute, []Key{{ID: "k1", Secret: testSecret(), NotBefore: now.Add(time.Hour)}})
+	s, _ := NewSchedule(15*time.Minute, 5*time.Minute, []Key{{ID: "k1", MAC: kms.NewLocalMAC(testSecret()), NotBefore: now.Add(time.Hour)}})
 	if err := s.CheckCurrentKey(now); err == nil {
 		t.Error("future-only key accepted")
 	}
-	s, _ = NewSchedule(15*time.Minute, 5*time.Minute, []Key{{ID: "k1", Secret: testSecret(), NotBefore: now.Add(-time.Hour)}})
+	s, _ = NewSchedule(15*time.Minute, 5*time.Minute, []Key{{ID: "k1", MAC: kms.NewLocalMAC(testSecret()), NotBefore: now.Add(-time.Hour)}})
 	if err := s.CheckCurrentKey(now); err != nil {
 		t.Error(err)
 	}

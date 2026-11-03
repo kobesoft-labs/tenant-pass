@@ -1,7 +1,7 @@
 tenant-pass
-Copyright 2026 The tenant-pass Authors
+Copyright 2026 KOBESOFT, Inc.
 
-This product includes software developed by the tenant-pass Authors
+This product includes software developed at KOBESOFT, Inc.
 (https://github.com/kobesoft-labs/tenant-pass).
 
 Test vectors in internal/paseto/paseto_test.go are taken from the PASETO

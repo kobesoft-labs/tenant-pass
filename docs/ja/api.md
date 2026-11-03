@@ -6,7 +6,7 @@ tenant-pass は `listen` で HTTPS（TLS 1.2 以上）を提供します。す�
 
 ## `POST /v1/credentials`
 
-パスをテナントの認証情報と交換します。
+パス（またはジョブチケット）をテナントの認証情報と交換します。
 
 ### リクエスト
 
@@ -28,7 +28,8 @@ Content-Type: application/json
 
 | メンバー | 型 | 必須 | 意味 |
 | --- | --- | --- | --- |
-| `pass` | string | はい | ゲートウェイから受け取ったパス。[pass-format.md](pass-format.md) を参照してください。 |
+| `pass` | string | `pass` / `ticket` のいずれか | ゲートウェイから受け取ったパス。[pass-format.md](pass-format.md) を参照してください。 |
+| `ticket` | string | `pass` / `ticket` のいずれか | ジョブチケット。アプリケーションに `jobs` が必要です。[jobs.md](jobs.md) を参照してください。 |
 | `repair` | bool | いいえ | tenant-pass から得た認証情報がストアで拒否された（認証失敗）直後に `true` を設定します。PostgreSQL の場合、tenant-pass はロールが最新に見えても書き直します（レプリカごと、アカウントごとに 10 秒に最大 1 回。それを超えるリクエストは通常どおり処理されます）。MySQL と Redis はリクエストのたびに実際のパスワードハッシュを検証するため、`repair` による追加の効果はありません。 |
 
 ### レスポンス `200 OK`
@@ -67,8 +68,9 @@ Content-Type: application/json
 | --- | --- | --- |
 | 400 | `invalid_request` | ボディが空でない `pass` を持つ JSON オブジェクトではない、未知または重複したメンバーがある、または後続データがある。 |
 | 400 | `invalid_pass` | パスが拒否された: 形式不正、未知の鍵、不正な署名、不正なクレーム、期限切れ、または `aud` が呼び出し元のアプリケーションではない。 |
+| 400 | `invalid_ticket` | ジョブチケットが拒否された。理由はパスの場合と同じ。 |
 | 401 | `unauthorized` | アプリケーションの認証に失敗した。`WWW-Authenticate: Bearer realm="tenant-pass"` が付きます。 |
-| 403 | `denied` | そのようなテナントが存在しない、アプリケーションがそのテナントに対して許可されていない、テナントが無効化されている、またはストアがアカウントを拒否した。 |
+| 403 | `denied` | そのようなテナントが存在しない、アプリケーションがそのテナントに対して許可されていない、テナントが無効化されている、ストアがアカウントを拒否した、または（チケットの場合）アプリケーションに対してジョブチケットが有効になっていない。 |
 | 404 | `not_found` | 未知のパス。 |
 | 405 | `method_not_allowed` | `POST` ではない。 |
 | 413 | `request_too_large` | ボディが 4096 バイトを超えている。 |
@@ -78,6 +80,31 @@ Content-Type: application/json
 | 503 | `unavailable` | ディレクトリまたはストアのエラー、タイムアウト、またはこのレプリカとストアサーバーの間の時計のずれ。バックオフしてリトライしてください（別のレプリカでは成功する可能性があります）。 |
 
 クライアントは、400、401、403 をそのパスについては恒久的なエラーとして、429/503 をリトライ可能なエラーとして扱ってください。
+
+## `POST /v1/job-tickets`
+
+後から実行される処理が認証情報を取得できるように、パスを同じテナントのジョブチケットと交換します。`job_tickets.signing_key` と、アプリケーションの `"jobs": {"issue": true}` が必要です。[jobs.md](jobs.md) を参照してください。
+
+```http
+POST /v1/job-tickets HTTP/1.1
+Authorization: Bearer tpa_…
+Content-Type: application/json
+
+{"pass": "v4.public.…", "ttl": "15m"}
+```
+
+| メンバー | 必須 | 意味 |
+| --- | --- | --- |
+| `pass` | はい | 呼び出し元のアプリケーションに対して有効なパス。 |
+| `ttl` | いいえ | 要求する寿命。秒単位（小数なし）で、`1m` 以上。`apps[].jobs.max_ttl` と `job_tickets.max_ttl` が上限になります。デフォルト: アプリケーションの `jobs.max_ttl`。 |
+
+レスポンス `200`:
+
+```json
+{"ticket": "v4.public.…", "tenant": "acme", "expires_at": "2026-11-03T12:30:00Z"}
+```
+
+テナントは発行時に解決されます（存在し、有効化されていて、アプリケーションに対して許可されていなければなりません）。発行は、アプリケーションの異なるテナント数の枠に算入されます。エラーは `/v1/credentials` と同じです。発行がアプリケーションに対して有効になっていない場合も `403 denied` になります。
 
 ## `GET /healthz`
 
@@ -95,7 +122,7 @@ Content-Type: application/json
 
 ## 監査ログ
 
-tenant-pass は、認証情報リクエストごとに 1 行の JSON を標準出力に書き出します（`"msg":"credential"`）。
+tenant-pass は、リクエストごとに 1 行の JSON を標準出力に書き出します。`/v1/credentials` では `"msg":"credential"`、`/v1/job-tickets` では `"msg":"job_ticket"` です。
 
 ```json
 {"time":"2026-11-03T12:00:01Z","level":"INFO","msg":"credential","request_id":"43f007226bb0e766","app":"billing","repair":false,"jti":"hamSSKegCc-kk82SdW2dpw","host":"acme.example.com","tenant":"acme","node":"pg1","account":"t_acme","store":"postgres","window":1993007,"key_id":"k1","changed":true,"expires_at":"2026-11-03T12:13:59Z","result":"ok","duration_ms":7}
@@ -103,12 +130,14 @@ tenant-pass は、認証情報リクエストごとに 1 行の JSON を標準�
 
 | フィールド | 意味 |
 | --- | --- |
+| `via` | `pass` または `ticket`。 |
+| `issuer` | チケットの場合: それに署名した鍵 ID。 |
 | `result` | `ok`、またはクライアントに返したエラーコード。 |
-| `reason` | 失敗した理由: `app_auth`、`body_size`、`body_json`、`content_type`、`pass_malformed`、`pass_unknown_key`、`pass_signature`、`pass_claims`、`pass_expired`、`pass_audience`、`distinct_tenants`、`tenant_not_found`、`tenant_disabled`、`directory_error`、`directory_mismatch`、`unknown_node`、`account_refused`、`clock_skew`、`timeout`、`store_error`、`max_concurrent_requests`。 |
+| `reason` | 失敗した理由: `app_auth`、`body_size`、`body_json`、`content_type`、`pass_malformed`、`pass_unknown_key`、`pass_signature`、`pass_claims`、`pass_expired`、`pass_audience`、`distinct_tenants`、`distinct_tenants_jobs`、`pass_or_ticket`、`jobs_not_enabled`、`job_issue_not_enabled`、`issuer_not_allowed`、`ticket_lifetime`、`ticket_*`（`pass_*` と同様）、`ttl`、`sign_error`、`tenant_not_found`、`tenant_disabled`、`directory_error`、`directory_mismatch`、`unknown_node`、`account_refused`、`clock_skew`、`timeout`、`store_error`、`max_concurrent_requests`。 |
 | `error` | `directory_error` / `store_error` / `account_refused` の場合のエラーの分類（SQLSTATE、MySQL のエラー番号、Redis のエラープレフィックス、拒否理由）。サーバーのエラーメッセージはコピーされません。 |
 | `changed` | ストアが変更されたかどうか。 |
 | `window`、`key_id` | 認証情報がどのウィンドウとどのローテーション鍵に属するか。 |
 
-ログに決して記録されないもの: パスワード、ベリファイア、ハッシュ、パス、アプリトークン、ローテーション鍵。クライアントの IP アドレスは tenant-pass では記録しません。必要であればロードバランサーから取得してください。
+ログに決して記録されないもの: パスワード、ベリファイア、ハッシュ、パス、ジョブチケット、アプリトークン、ローテーション鍵。クライアントの IP アドレスは tenant-pass では記録しません。必要であればロードバランサーから取得してください。
 
 レベル: 成功時は `INFO`、クライアントエラーは `WARN`、`directory_error`、`store_error`、`account_refused`、`clock_skew`、`unknown_node`、`directory_mismatch` は `ERROR` です。何をアラート対象にすべきかについては [operations.md](operations.md#監視) を参照してください。

@@ -10,6 +10,7 @@
 //	tenant-pass gen-rotation-key -out FILE
 //	tenant-pass gen-app-token
 //	tenant-pass sign-pass       -key FILE -kid ID -aud APP (-host H | -tenant T) [-ttl 30s]
+//	tenant-pass sign-job-ticket -key FILE -kid ID -aud APP -tenant T [-ttl 1h]
 //	tenant-pass version
 //
 // See docs/en/ for the full documentation.
@@ -73,6 +74,10 @@ func main() {
 		err = cmdGenAppToken(os.Stdout)
 	case "sign-pass":
 		err = cmdSignPass(args)
+	case "sign-job-ticket":
+		err = cmdSignJobTicket(args)
+	case "gen-signing-key":
+		err = cmdGenGatewayKey(args)
 	case "version":
 		fmt.Println(versionString())
 	case "help", "-h", "--help":
@@ -94,9 +99,11 @@ commands:
   serve             run the server
   check-config      validate a configuration file (-connect also tests connections)
   gen-gateway-key   create an Ed25519 key pair for a gateway
+  gen-signing-key   same as gen-gateway-key (job ticket keys, scheduler keys)
   gen-rotation-key  create a rotation key file
   gen-app-token     create an application token and its hash
   sign-pass         sign a pass with a gateway key (testing and integration)
+  sign-job-ticket   sign a job ticket with a scheduler key
   version           print the version
 `)
 }
@@ -238,6 +245,11 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	jobVerifier, jobSigner, jobPolicies, err := buildJobs(ctx, a.cfg)
+	if err != nil {
+		return err
+	}
+
 	srv := server.New(server.Config{
 		Auth: authn,
 		Verifier: &pass.Verifier{
@@ -251,6 +263,9 @@ func cmdServe(args []string) error {
 		IssueTimeout: time.Duration(f.Limits.IssueTimeout),
 		MaxInFlight:  f.Limits.MaxConcurrentRequests,
 		Logger:       logger,
+		JobVerifier:  jobVerifier,
+		JobSigner:    jobSigner,
+		JobPolicies:  jobPolicies,
 	})
 
 	hs := &http.Server{
@@ -308,6 +323,64 @@ func cmdServe(args []string) error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// buildJobs constructs the job ticket verifier, tenant-pass's own ticket
+// signer (local or Vault Transit) and the per-application policies.
+func buildJobs(ctx context.Context, cfg *config.Resolved) (*pass.JobVerifier, *pass.Signer, map[string]server.JobPolicy, error) {
+	if cfg.Jobs == nil {
+		return nil, nil, nil, nil
+	}
+	j := cfg.Jobs
+	keys := map[string]ed25519.PublicKey{}
+	for id, k := range j.Issuers {
+		keys[id] = k
+	}
+	var signer *pass.Signer
+	switch {
+	case j.LocalSigner != nil:
+		signer = &pass.Signer{KeyID: j.SigningKeyID, Key: j.LocalSigner}
+		keys[j.SigningKeyID] = j.LocalSigner.Public().(ed25519.PublicKey)
+	case j.Transit != nil:
+		sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		ts, err := cfg.Vault.NewTransitSigner(sctx, j.Transit.Key, j.Transit.Version)
+		cancel()
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("job_tickets.signing_key: %w", err)
+		}
+		signer = &pass.Signer{KeyID: j.SigningKeyID, Remote: ts.Sign}
+		keys[j.SigningKeyID] = ts.Public()
+		// The Transit key's material is only known now; check it is not
+		// also trusted as a gateway key or another issuer.
+		others := []ed25519.PublicKey{ts.Public()}
+		for _, k := range j.Issuers {
+			others = append(others, k)
+		}
+		if err := config.DistinctKeys(cfg.GatewayKeys, others); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	policies := map[string]server.JobPolicy{}
+	for _, a := range cfg.Apps {
+		if a.Jobs == nil {
+			continue
+		}
+		issuers := map[string]bool{}
+		if j.SigningKeyID != "" {
+			issuers[j.SigningKeyID] = true
+		}
+		for _, id := range a.Jobs.TrustedIssuers {
+			issuers[id] = true
+		}
+		policies[a.Name] = server.JobPolicy{
+			Issue:   a.Jobs.Issue,
+			MaxTTL:  min(time.Duration(a.Jobs.MaxTTL), j.MaxTTL),
+			Limiter: ratelimit.NewDistinct(a.Jobs.MaxTenantsPerMinute),
+			Issuers: issuers,
+		}
+	}
+	v := &pass.JobVerifier{Keys: keys, MaxTTL: j.MaxTTL, Leeway: time.Duration(cfg.File.Pass.Leeway)}
+	return v, signer, policies, nil
 }
 
 func toAuthApps(apps []config.ResolvedApp) []auth.App {
@@ -448,5 +521,28 @@ func cmdSignPass(args []string) error {
 		return err
 	}
 	fmt.Println(p)
+	return nil
+}
+
+func cmdSignJobTicket(args []string) error {
+	fs := flag.NewFlagSet("sign-job-ticket", flag.ExitOnError)
+	keyFile := fs.String("key", "", "issuer private key (PEM)")
+	kid := fs.String("kid", "", "issuer key ID")
+	aud := fs.String("aud", "", "application name")
+	tenant := fs.String("tenant", "", "tenant ID")
+	ttl := fs.Duration("ttl", time.Hour, "lifetime (at most 24h; tenant-pass enforces its own max_ttl)")
+	fs.Parse(args)
+	sk, err := config.ReadEd25519PrivateKey(*keyFile)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	t, err := pass.Signer{KeyID: *kid, Key: sk}.SignJob(context.Background(), pass.JobClaims{
+		Audience: *aud, Tenant: *tenant, IssuedAt: now, Expiry: now.Add(*ttl),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(t)
 	return nil
 }

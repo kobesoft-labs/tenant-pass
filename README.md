@@ -58,6 +58,9 @@ This is not a general secrets manager. If you need dynamic credentials without r
 | Rotation overlap | none (clients retry once) | old and new both valid | old and new both valid |
 | "Managed" marker | membership in a group role | granted a marker role | marker channel rule |
 
+- **Ready-made gateway**: `tenant-pass-gateway` plugs into Caddy, nginx, Traefik or Envoy as forward-auth, verifies your identity provider's session tokens (JWT/OIDC) and signs passes only for the user's own tenant.
+- **Background jobs**: job tickets let queued and scheduled work obtain one tenant's credentials later, without stretching passes.
+- **Keys in a KMS**: rotation keys and signing keys can live in HashiCorp Vault / OpenBao Transit, so they cannot be copied off a compromised host.
 - Stateless: run any number of replicas behind a load balancer. All replicas derive identical passwords.
 - Tenant directory: static (in the config file) or your own SQL query on PostgreSQL or MySQL.
 - Pass format: PASETO v4.public (Ed25519) with domain separation, so gateways can be written in any language with a PASETO library.
@@ -70,6 +73,7 @@ This is not a general secrets manager. If you need dynamic credentials without r
 
 ```sh
 go install github.com/kobesoft-labs/tenant-pass/cmd/tenant-pass@latest
+go install github.com/kobesoft-labs/tenant-pass/cmd/tenant-pass-gateway@latest   # optional ready-made gateway
 
 # Gateway key pair (the private key belongs to the gateway only)
 tenant-pass gen-gateway-key -private gw.key -public gw.pub
@@ -123,7 +127,10 @@ curl -s https://tenant-pass.internal:8443/v1/credentials \
 | [Password derivation](docs/en/derivation.md) | Window and password derivation specification and test vectors |
 | [Configuration](docs/en/configuration.md) | Every configuration key |
 | [PostgreSQL](docs/en/stores/postgres.md) · [MySQL](docs/en/stores/mysql.md) · [Redis](docs/en/stores/redis.md) | Store setup with least privilege |
-| [Gateway integration](docs/en/gateway-integration.md) | How to sign passes correctly |
+| [tenant-pass-gateway](docs/en/gateway.md) | The forward-auth gateway component, with Caddy/nginx/Traefik/Envoy configuration |
+| [Gateway integration](docs/en/gateway-integration.md) | Rules for signing passes in your own gateway |
+| [Background jobs](docs/en/jobs.md) | Job tickets for queued and scheduled work |
+| [Key management](docs/en/kms.md) | Keeping keys in Vault / OpenBao Transit |
 | [Client integration](docs/en/client-integration.md) | How applications should fetch, cache and refresh credentials |
 | [Operations](docs/en/operations.md) | Deployment, key rotation, monitoring, incident response |
 
@@ -137,4 +144,4 @@ Please report vulnerabilities privately. See [SECURITY.md](SECURITY.md).
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Copyright 2026 KOBESOFT, Inc. Licensed under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

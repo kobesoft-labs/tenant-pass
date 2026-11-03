@@ -189,7 +189,7 @@ func (s *Store) Issue(ctx context.Context, user string, _ bool) (store.Credentia
 	if err != nil {
 		return store.Credential{}, err
 	}
-	return store.Build(s.sched, acc, plan.Issue, changed)
+	return store.Build(ctx, s.sched, acc, plan.Issue, changed)
 }
 
 // Sweep implements store.Store.
@@ -247,7 +247,7 @@ func (s *Store) inspect(ctx context.Context, user string, now time.Time, full bo
 	acc := s.account(user)
 	byHash := map[string]int64{}
 	for _, n := range store.Candidates(s.sched, acc, now) {
-		if pw, _, err := s.sched.Password(acc, n); err == nil {
+		if pw, _, err := s.sched.Password(ctx, acc, n); err == nil {
 			byHash[pwhash.Redis(pw)] = n
 		}
 	}
@@ -365,7 +365,7 @@ func (s *Store) apply(ctx context.Context, user string, keep []int64, per []serv
 	acc := s.account(user)
 	want := make([]string, 0, len(keep))
 	for _, n := range keep {
-		pw, _, err := s.sched.Password(acc, n)
+		pw, _, err := s.sched.Password(ctx, acc, n)
 		if err != nil {
 			return false, err
 		}

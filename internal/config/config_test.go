@@ -26,6 +26,9 @@ func fixture(t *testing.T, mutate func(string) string) string {
 	pk, _, _ := ed25519.GenerateKey(nil)
 	der, _ := x509.MarshalPKIXPublicKey(pk)
 	w("gw.pub", string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), 0o644)
+	pk2, _, _ := ed25519.GenerateKey(nil)
+	der2, _ := x509.MarshalPKIXPublicKey(pk2)
+	w("sched.pub", string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der2})), 0o644)
 	w("rot.key", "pQ4m0g2Yk3qvQW1o8bqgK3n4cS1u9xJ0eF7rT6yU5iA=\n", 0o600)
 	w("pg.pw", "adminpw\n", 0o600)
 	w("tls.key", "unused\n", 0o600)
@@ -103,6 +106,25 @@ func TestInvalidConfigs(t *testing.T) {
 		"both directories":       rep(`"directory": {`, `"directory": {"sql": {"driver": "postgres"}, `),
 		"redis with endpoint":    rep(`"type": "postgres"`, `"type": "redis"`),
 		"bad log level":          rep(`"listen"`, `"log_level": "verbose", "listen"`),
+		"clock skew too large":   rep(`"rotation": {`, `"rotation": {"max_clock_skew": "2m", `),
+		"marker on postgres":     rep(`"managed_group": "tenant_pass_managed",`, `"managed_group": "tenant_pass_managed", "managed_marker": "x",`),
+		"transit without kms":    rep(`{"id": "k1", "secret_file": "DIR/rot.key",`, `{"id": "k1", "transit": {"key": "rot", "version": 1},`),
+		"secret and transit":     rep(`"secret_file": "DIR/rot.key",`, `"secret_file": "DIR/rot.key", "transit": {"key": "rot", "version": 1},`),
+		"plaintext vault":        rep(`"listen"`, `"kms": {"vault": {"address": "http://vault:8200", "token_file": "DIR/pg.pw", "insecure_plaintext": true}}, "listen"`),
+		"vault http without tls": rep(`"listen"`, `"kms": {"vault": {"address": "http://vault:8200", "token_file": "DIR/pg.pw"}}, "listen"`),
+		"jobs without tickets":   rep(`"token_sha256"`, `"jobs": {"issue": false}, "token_sha256"`),
+		"job_tickets empty":      rep(`"listen"`, `"job_tickets": {}, "listen"`),
+		"job ttl too long":       rep(`"listen"`, `"job_tickets": {"max_ttl": "48h", "trusted_issuers": [{"id": "sched", "public_key_file": "DIR/sched.pub"}]}, "listen"`),
+		"issue without signing key": func(s string) string {
+			s = strings.Replace(s, `"listen"`, `"job_tickets": {"trusted_issuers": [{"id": "sched", "public_key_file": "DIR/sched.pub"}]}, "listen"`, 1)
+			return strings.Replace(s, `"token_sha256"`, `"jobs": {"issue": true}, "token_sha256"`, 1)
+		},
+		"job key id clashes with gateway": rep(`"listen"`, `"job_tickets": {"trusted_issuers": [{"id": "gw1", "public_key_file": "DIR/sched.pub"}]}, "listen"`),
+		"job key equals gateway key":      rep(`"listen"`, `"job_tickets": {"trusted_issuers": [{"id": "sched", "public_key_file": "DIR/gw.pub"}]}, "listen"`),
+		"unknown issuer for app": func(s string) string {
+			s = strings.Replace(s, `"listen"`, `"job_tickets": {"trusted_issuers": [{"id": "sched", "public_key_file": "DIR/sched.pub"}]}, "listen"`, 1)
+			return strings.Replace(s, `"token_sha256"`, `"jobs": {"trusted_issuers": ["nope"]}, "token_sha256"`, 1)
+		},
 	}
 	for name, mut := range cases {
 		if _, err := load(t, mut); err == nil {
@@ -134,6 +156,26 @@ func TestAccountPatternFullyAnchored(t *testing.T) {
 func TestExampleConfigParses(t *testing.T) {
 	if _, err := Load("../../examples/config.example.json"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestJobsAndVaultValid(t *testing.T) {
+	r, err := load(t, func(s string) string {
+		s = strings.Replace(s, `"listen"`, `"allow_insecure_plaintext": true,
+  "kms": {"vault": {"address": "http://127.0.0.1:8200", "token_file": "DIR/pg.pw", "insecure_plaintext": true}},
+  "job_tickets": {"max_ttl": "2h", "trusted_issuers": [{"id": "sched", "public_key_file": "DIR/sched.pub"}]},
+  "listen"`, 1)
+		s = strings.Replace(s, `{"id": "k1", "secret_file": "DIR/rot.key",`, `{"id": "k1", "transit": {"key": "rot", "version": 1},`, 1)
+		return strings.Replace(s, `"token_sha256"`, `"jobs": {"max_tenants_per_minute": 600}, "token_sha256"`, 1)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Vault == nil || r.Jobs == nil || r.Jobs.MaxTTL != 2*time.Hour || len(r.Jobs.Issuers) != 1 {
+		t.Fatalf("unexpected: %+v", r.Jobs)
+	}
+	if j := r.Apps[0].Jobs; j == nil || j.Issue || time.Duration(j.MaxTTL) != time.Hour || j.MaxTenantsPerMinute != 600 {
+		t.Fatalf("app jobs: %+v", j)
 	}
 }
 

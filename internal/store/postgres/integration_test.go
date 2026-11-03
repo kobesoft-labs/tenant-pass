@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 	"github.com/kobesoft-labs/tenant-pass/internal/netcfg"
 	"github.com/kobesoft-labs/tenant-pass/internal/rotation"
 	"github.com/kobesoft-labs/tenant-pass/internal/secret"
@@ -100,7 +101,7 @@ func setup(t *testing.T) (*Store, *rotation.Schedule) {
 	if _, err := su.Exec(context.Background(), setupSQL); err != nil {
 		t.Fatal(err)
 	}
-	sched, err := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", Secret: []byte("0123456789abcdef0123456789abcdeX")}})
+	sched, err := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", MAC: kms.NewLocalMAC([]byte("0123456789abcdef0123456789abcdeX"))}})
 	if err != nil {
 		t.Fatal(err)
 	}

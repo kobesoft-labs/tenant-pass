@@ -20,6 +20,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	"github.com/kobesoft-labs/tenant-pass/internal/kms"
 	"github.com/kobesoft-labs/tenant-pass/internal/netcfg"
 	"github.com/kobesoft-labs/tenant-pass/internal/rotation"
 	"github.com/kobesoft-labs/tenant-pass/internal/secret"
@@ -102,7 +103,7 @@ func setup(t *testing.T) (*Store, *rotation.Schedule, []string) {
 		}
 		servers = append(servers, resolved(t, a, "tenant_pass_admin", "adminpw"))
 	}
-	sched, err := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", Secret: []byte("0123456789abcdef0123456789abcdeZ")}})
+	sched, err := rotation.NewSchedule(15*time.Minute, 5*time.Minute, []rotation.Key{{ID: "k1", MAC: kms.NewLocalMAC([]byte("0123456789abcdef0123456789abcdeZ"))}})
 	if err != nil {
 		t.Fatal(err)
 	}

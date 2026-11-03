@@ -26,6 +26,8 @@ tenant-pass は 1 つの JSON ファイル（`-config`）を読み込みます�
 | `apps` | 必須 | API の呼び出しを許可するアプリケーション。 |
 | `directory` | 必須 | テナントディレクトリ: `static` と `sql` のちょうど一方。 |
 | `rotation` | 必須 | ローテーション鍵とタイミング。 |
+| `kms` | | 鍵管理システムへの接続（[kms.md](kms.md)）。 |
+| `job_tickets` | | ジョブチケット（[jobs.md](jobs.md)）。 |
 | `nodes` | 必須 | tenant-pass が管理するストア。 |
 | `limits` | | リクエストの制限。 |
 | `shutdown` | | グレースフルシャットダウンのタイミング。 |
@@ -64,6 +66,7 @@ tenant-pass は 1 つの JSON ファイル（`-config`）を読み込みます�
 | `name` | アプリケーション名。ゲートウェイがこのアプリケーション向けに署名するパスの `aud` と一致しなければなりません。`^[a-z][a-z0-9_-]{0,62}$`。 |
 | `token_sha256` | アプリトークンの SHA-256。小文字の 16 進 64 文字。`tenant-pass gen-app-token` で作成します。 |
 | `client_cert_uri` | アプリケーションのクライアント証明書が持っていなければならない URI SAN（たとえば SPIFFE ID）。`tls.client_ca_file` が必要です。 |
+| `jobs` | 任意。このアプリケーションでジョブチケットを有効にします: `issue`（bool。`POST /v1/job-tickets` を呼び出してよい）、`max_ttl`（デフォルト `1h`、1m〜24h。発行されるチケットの上限）、`max_tenants_per_minute`（デフォルト 60。チケットの引き換えにおける 1 分あたりの異なるテナントの数、レプリカごと。`limits.max_tenants_per_minute` に **加えて** 適用される枠）、`trusted_issuers`（このアプリケーションがチケットを引き換えてよい、`job_tickets.trusted_issuers` の ID）。`max_ttl` を超える寿命のチケットは、引き換え時にも拒否されます。`jobs` がない場合、アプリケーションはチケットを入手することも引き換えることもできません。 |
 
 `token_sha256` / `client_cert_uri` の少なくとも一方が必要です。両方を設定した場合は、すべてのリクエストで両方が必要になります。トークンハッシュと証明書 URI は一意でなければなりません。
 
@@ -126,6 +129,7 @@ tenant-pass は 1 つの JSON ファイル（`-config`）を読み込みます�
 | --- | --- |
 | `id` | 鍵 ID（`^[a-z][a-z0-9_-]{0,62}$`）。導出の入力の一部です。鍵の名前を変えると、その鍵のすべてのパスワードが変わります。 |
 | `secret_file` | 32 バイト以上のランダムなバイト列の Base64。`tenant-pass gen-rotation-key` で作成します。明らかなプレースホルダー値（繰り返しパターン）は拒否されます。 |
+| `transit` | `secret_file` の代わりに: Vault/OpenBao 内の `{"key": "<Transit hmac key>", "version": N}`（`kms.vault` が必要）。バージョンは固定されます。 |
 | `not_before` | RFC 3339 形式の時刻。ウィンドウ `n` では、`not_before ≤ Start(n)` を満たす鍵のうち `not_before` が最も新しいものを使います。起動時点で、最も古い鍵は少なくとも 1 ウィンドウ分過去になければなりません。 |
 
 すべてのレプリカで、`rotation` の設定とノード名が同一でなければなりません。`window` を変更すると、すべてのアカウントのウィンドウ境界が変わります。[operations.md](operations.md#ウィンドウの変更) を参照してください。
@@ -166,6 +170,30 @@ tenant-pass は 1 つの JSON ファイル（`-config`）を読み込みます�
 | `insecure_plaintext` | TLS を無効にする。トップレベルの `allow_insecure_plaintext` が必要。テスト専用。 |
 
 TLS では常に証明書チェーンとホスト名が検証されます。「検証をスキップ」するオプションはありません。
+
+## `kms`
+
+```json
+"kms": {"vault": {"address": "https://vault.internal:8200", "token_file": "/run/vault/token", "mount": "transit", "tls": {"ca_file": "/etc/tenant-pass/vault-ca.pem"}}}
+```
+
+| キー | 説明 |
+| --- | --- |
+| `vault.address` | ベース URL。`insecure_plaintext`（トップレベルの `allow_insecure_plaintext` と併用。テスト専用）でない限り `https`。 |
+| `vault.token_file` | Vault トークンのファイル。リクエストのたびに読み直されます。 |
+| `vault.namespace` | 任意の `X-Vault-Namespace`。 |
+| `vault.mount` | Transit のマウント。デフォルトは `transit`。 |
+| `vault.tls` | エンドポイントと同じ。 |
+
+## `job_tickets`
+
+| キー | デフォルト | 説明 |
+| --- | --- | --- |
+| `signing_key` | | tenant-pass 自身のチケット用の鍵: `id` と、`private_key_file`（PEM、`tenant-pass gen-signing-key`）または `transit`（`key`、`version`）のいずれか。`POST /v1/job-tickets` に必要です。 |
+| `trusted_issuers` | | 外部の発行者（スケジューラー）: `[{"id", "public_key_file"}]`。 |
+| `max_ttl` | `"1h"` | 受け付けるチケットの寿命の最大値（1m〜24h）。 |
+
+`signing_key` / `trusted_issuers` の少なくとも一方が必要です。鍵 ID **と鍵マテリアル** は、互いに異なり、かつ `gateway_keys` とも異なっていなければなりません（Transit の署名鍵は起動時にチェックされます）。
 
 ## `limits`
 

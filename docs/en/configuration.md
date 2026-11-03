@@ -26,6 +26,8 @@ tenant-pass reads one JSON file (`-config`). A complete example is [examples/con
 | `apps` | required | Applications allowed to call the API. |
 | `directory` | required | Tenant directory: exactly one of `static` or `sql`. |
 | `rotation` | required | Rotation keys and timing. |
+| `kms` | | Key management system connection ([kms.md](kms.md)). |
+| `job_tickets` | | Job tickets ([jobs.md](jobs.md)). |
 | `nodes` | required | Stores tenant-pass manages. |
 | `limits` | | Request limits. |
 | `shutdown` | | Graceful shutdown timing. |
@@ -64,6 +66,7 @@ Several keys may be configured at once (several gateways, or rotation).
 | `name` | Application name; must equal the `aud` of passes the gateway signs for it. `^[a-z][a-z0-9_-]{0,62}$`. |
 | `token_sha256` | SHA-256 of the app token, 64 lowercase hex characters. Created by `tenant-pass gen-app-token`. |
 | `client_cert_uri` | URI SAN the application's client certificate must carry (for example a SPIFFE ID). Requires `tls.client_ca_file`. |
+| `jobs` | Optional. Enables job tickets for this application: `issue` (bool, may call `POST /v1/job-tickets`), `max_ttl` (default `1h`, 1m–24h, cap for issued tickets), `max_tenants_per_minute` (default 60, distinct tenants per minute for ticket redemption, per replica; a budget **in addition** to `limits.max_tenants_per_minute`), `trusted_issuers` (IDs from `job_tickets.trusted_issuers` whose tickets this application may redeem). Ticket lifetimes above `max_ttl` are refused on redemption too. Without `jobs`, the application can neither obtain nor redeem tickets. |
 
 At least one of `token_sha256` / `client_cert_uri` is required. If both are set, both are required on every request. Token hashes and certificate URIs must be unique.
 
@@ -126,6 +129,7 @@ Restricting tenants to applications is the query's job, via the second parameter
 | --- | --- |
 | `id` | Key ID (`^[a-z][a-z0-9_-]{0,62}$`). Part of the derivation: renaming a key changes all its passwords. |
 | `secret_file` | Base64 of at least 32 random bytes. Created by `tenant-pass gen-rotation-key`. Obvious placeholder values (repeated patterns) are rejected. |
+| `transit` | Instead of `secret_file`: `{"key": "<Transit hmac key>", "version": N}` in Vault/OpenBao (requires `kms.vault`). The version is pinned. |
 | `not_before` | RFC 3339 time. Window `n` uses the key with the latest `not_before ≤ Start(n)`. The earliest key must be at least one window in the past at startup. |
 
 All replicas must have identical `rotation` settings and node names. Changing `window` changes every account's window boundaries: see [operations.md](operations.md#changing-the-window).
@@ -166,6 +170,30 @@ Used by `directory.sql.endpoint`, `nodes[].endpoint` and `nodes[].servers[]`. te
 | `insecure_plaintext` | Disable TLS. Requires top-level `allow_insecure_plaintext`. Testing only. |
 
 TLS always verifies the certificate chain and the host name. There is no "skip verify" option.
+
+## `kms`
+
+```json
+"kms": {"vault": {"address": "https://vault.internal:8200", "token_file": "/run/vault/token", "mount": "transit", "tls": {"ca_file": "/etc/tenant-pass/vault-ca.pem"}}}
+```
+
+| Key | Description |
+| --- | --- |
+| `vault.address` | Base URL; `https` unless `insecure_plaintext` (with top-level `allow_insecure_plaintext`, testing only). |
+| `vault.token_file` | Vault token file, re-read on every request. |
+| `vault.namespace` | Optional `X-Vault-Namespace`. |
+| `vault.mount` | Transit mount, default `transit`. |
+| `vault.tls` | As for endpoints. |
+
+## `job_tickets`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `signing_key` | | tenant-pass's own ticket key: `id` and either `private_key_file` (PEM, `tenant-pass gen-signing-key`) or `transit` (`key`, `version`). Required for `POST /v1/job-tickets`. |
+| `trusted_issuers` | | External issuers (schedulers): `[{"id", "public_key_file"}]`. |
+| `max_ttl` | `"1h"` | Largest ticket lifetime accepted (1m–24h). |
+
+At least one of `signing_key` / `trusted_issuers` is required. Key IDs **and key material** must differ from each other and from `gateway_keys` (a Transit signing key is checked at startup).
 
 ## `limits`
 
