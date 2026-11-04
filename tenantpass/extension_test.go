@@ -15,7 +15,7 @@ func ok(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapo
 func host() Host { return Host{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))} }
 
 func TestCheckPattern(t *testing.T) {
-	good := []string{"POST /v1/storage", "/v1/storage/public", "GET /x/{id}", "POST example.internal/v1/ticket"}
+	good := []string{"POST /v1/storage", "/v1/storage/public", "GET /x/{id}"}
 	for _, p := range good {
 		if err := checkPattern(p); err != nil {
 			t.Errorf("%q: %v", p, err)
@@ -24,6 +24,7 @@ func TestCheckPattern(t *testing.T) {
 	bad := []string{
 		"/", "GET /", "POST /v1/credentials", "/v1/credentials", "/v1/credentials/",
 		"GET /healthz", "/readyz", "/v1/job-tickets", "/v1/", " /x", "x",
+		"POST /v1/credential%73", "GET /read%79z", "evil.example/{x...}", "POST example.com/{x...}", "POST example.internal/v1/ticket", "tenant-pass:8443/v1/credentials",
 	}
 	for _, p := range bad {
 		if err := checkPattern(p); err == nil {
@@ -72,6 +73,14 @@ func TestMountExtensions(t *testing.T) {
 	}, host())
 	if err == nil {
 		t.Fatal("core path accepted")
+	}
+
+	// A wildcard that would win for some method is rejected.
+	_, _, _, err = mountExtensions(context.Background(), []Extension{
+		ext("a", map[string]http.Handler{"POST /v1/{x}": http.HandlerFunc(ok)}),
+	}, host())
+	if err == nil {
+		t.Fatal("POST /v1/{x} accepted")
 	}
 
 	// Mount error is returned with the extension's name.

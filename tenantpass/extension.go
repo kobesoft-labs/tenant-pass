@@ -88,8 +88,20 @@ func patternPath(p string) string {
 }
 
 // checkPattern rejects patterns that would shadow or collide with the
-// core's routes.
+// core's routes. Host patterns and escaped paths are refused outright:
+// ServeMux gives a host pattern precedence over every host-less core route,
+// and decodes %XX before matching, so either could take over a core path.
 func checkPattern(p string) error {
+	if strings.Contains(p, "%") {
+		return fmt.Errorf("route pattern %q: escaped characters are not allowed", p)
+	}
+	rest := p
+	if i := strings.IndexByte(rest, ' '); i >= 0 {
+		rest = strings.TrimLeft(rest[i+1:], " ")
+	}
+	if !strings.HasPrefix(rest, "/") {
+		return fmt.Errorf("route pattern %q: host patterns are not allowed", p)
+	}
 	path := patternPath(p)
 	if !strings.HasPrefix(path, "/") || path == "/" {
 		return fmt.Errorf("invalid route pattern %q", p)
@@ -173,6 +185,19 @@ func tryRegister(routes map[string]http.Handler) (err error) {
 	}
 	for p, h := range routes {
 		mux.Handle(p, h)
+	}
+	// Whatever the method, every core path must still be served by the
+	// core pattern.
+	for _, c := range server.CorePaths {
+		if c == "/" {
+			continue
+		}
+		for _, m := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+			req, _ := http.NewRequest(m, "http://tenant-pass.internal"+c, nil)
+			if _, pat := mux.Handler(req); pat != c {
+				return fmt.Errorf("extension route %q shadows the core route %s", pat, c)
+			}
+		}
 	}
 	return nil
 }

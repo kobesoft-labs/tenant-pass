@@ -45,8 +45,11 @@ core's trust boundary unchanged: adding an extension cannot weaken
 
 - Route patterns use `net/http` `ServeMux` syntax. They must not use the
   core's paths (`/v1/credentials`, `/v1/job-tickets`, `/healthz`, `/readyz`)
-  or `/`, and two extensions cannot register the same pattern. Violations
-  are startup errors.
+  or `/`, two extensions cannot register the same pattern, and patterns
+  with a host part or `%`-escapes are refused (ServeMux would let them take
+  precedence over, or decode into, core routes). After mounting, every core
+  path is checked to still reach the core for every method. Violations are
+  startup errors.
 - `Mount` runs once, after the configuration is loaded and before the
   listener opens. An error from `Mount` stops the server.
 - Extensions share the process with the rotation keys. Treat extension code
