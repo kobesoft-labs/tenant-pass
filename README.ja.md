@@ -136,6 +136,7 @@ curl -s https://tenant-pass.internal:8443/v1/credentials \
 | [鍵管理](docs/ja/kms.md) | 鍵を Vault / OpenBao Transit に保管する |
 | [クライアント連携](docs/ja/client-integration.md) | アプリケーションが認証情報を取得・キャッシュ・更新する方法 |
 | [運用](docs/ja/operations.md) | デプロイ、鍵のローテーション、監視、インシデント対応 |
+| [組み込み](docs/ja/embedding.md) | 独自のバイナリからサーバーを動かす・拡張を足す |
 
 ## ステータス
 

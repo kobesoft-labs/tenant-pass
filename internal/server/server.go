@@ -72,7 +72,18 @@ type Config struct {
 	// JobPolicies holds per-application job settings. An application
 	// without an entry can neither obtain nor redeem tickets.
 	JobPolicies map[string]JobPolicy
+
+	// Extra holds additional routes served on the same listener (see the
+	// tenantpass package). Keys are net/http ServeMux patterns. They must
+	// not overlap the core routes; New does not check this, the caller
+	// does (tenantpass.Serve).
+	Extra map[string]http.Handler
+	// ExtraReady are additional readiness checks for /readyz.
+	ExtraReady []func(context.Context) error
 }
+
+// CorePaths are the paths served by the core. Extensions may not use them.
+var CorePaths = []string{"/v1/credentials", "/v1/job-tickets", "/healthz", "/readyz", "/"}
 
 // JobPolicy is one application's job ticket settings.
 type JobPolicy struct {
@@ -118,6 +129,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/job-tickets", s.jobTickets)
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/readyz", s.readyz)
+	for pattern, h := range s.cfg.Extra {
+		mux.Handle(pattern, h)
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound)
 	})
@@ -633,6 +647,15 @@ func (s *Server) checkReady(ctx context.Context) error {
 		if e := n.Store.Ping(ctx); e != nil {
 			err = e
 			s.cfg.Logger.Warn("readiness", "node", name, "error", e.Error())
+		}
+	}
+	for _, check := range s.cfg.ExtraReady {
+		if err != nil {
+			break
+		}
+		if e := check(ctx); e != nil {
+			err = e
+			s.cfg.Logger.Warn("readiness", "extension", true, "error", e.Error())
 		}
 	}
 	s.readyAt, s.readyErr = time.Now(), err

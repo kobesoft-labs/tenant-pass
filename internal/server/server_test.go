@@ -266,3 +266,45 @@ func httptestRequest(path string, body io.Reader) *http.Request {
 }
 
 func newRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }
+
+func TestExtraRoutesAndReadiness(t *testing.T) {
+	var readyErr error
+	srv := New(Config{
+		Directory:   pingDirectory{},
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxInFlight: 1,
+		Extra: map[string]http.Handler{
+			"POST /v1/storage": http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }),
+		},
+		ExtraReady: []func(context.Context) error{func(context.Context) error { return readyErr }},
+	})
+	h := srv.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/storage", nil))
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("extra route: %d", rec.Code)
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("extra route without security headers")
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("readyz: %d", rec.Code)
+	}
+
+	readyErr = errors.New("extension down")
+	srv.readyAt = time.Time{} // drop the 5 s cache
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz with failing extension: %d", rec.Code)
+	}
+}
+
+// pingDirectory is a directory that only answers Ping.
+type pingDirectory struct{ directory.Directory }
+
+func (pingDirectory) Ping(context.Context) error { return nil }

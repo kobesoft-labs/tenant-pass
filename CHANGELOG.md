@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Package `tenantpass`: run the server from your own binary (`tenantpass.Serve`, `tenantpass.CheckConfig`) and add extensions, i.e. extra routes on the same listener with the same TLS, security headers, readiness and graceful shutdown. Extensions get no access to the core's keys or configuration. See [docs/en/embedding.md](docs/en/embedding.md).
+
+### Changed
+
+- The `tenant-pass` command now uses the `tenantpass` package. Behaviour is unchanged.
+
 ## [0.1.0] - 2026-11-03
 
 First public release. Pre-1.0: configuration and API may still change. Not yet externally audited.

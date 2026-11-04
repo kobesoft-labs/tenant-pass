@@ -136,6 +136,7 @@ curl -s https://tenant-pass.internal:8443/v1/credentials \
 | [Key management](docs/en/kms.md) | Keeping keys in Vault / OpenBao Transit |
 | [Client integration](docs/en/client-integration.md) | How applications should fetch, cache and refresh credentials |
 | [Operations](docs/en/operations.md) | Deployment, key rotation, monitoring, incident response |
+| [Embedding](docs/en/embedding.md) | Running the server from your own binary, with extensions |
 
 ## Status
 
