@@ -6,7 +6,7 @@ toolchain go1.26.10
 
 require (
 	filippo.io/edwards25519 v1.2.0
-	github.com/go-jose/go-jose/v4 v4.1.8
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/redis/go-redis/v9 v9.23.0
